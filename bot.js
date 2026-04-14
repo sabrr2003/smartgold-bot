@@ -10,9 +10,9 @@ let inPosition = false; let entryPrice = 0; let lastHeartbeat = 0;
 
 async function sendTelegram(msg) { const token = process.env.TELEGRAM_BOT_TOKEN; const chatId = process.env.TELEGRAM_CHAT_ID; if (!token || !chatId) return;
 
-await fetch(https://api.telegram.org/bot${token}/sendMessage, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, text: msg }), }); }
+return fetch(https://api.telegram.org/bot${token}/sendMessage, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, text: msg }), }); }
 
-async function sendHeartbeat() { const now = Date.now(); if (now - lastHeartbeat < 10 * 60 * 1000) return; lastHeartbeat = now; await sendTelegram('💓 Bot heartbeat: still running on Railway'); }
+async function sendHeartbeat() { const now = Date.now(); if (now - lastHeartbeat < 5 * 60 * 1000) return; lastHeartbeat = now; await sendTelegram('💓 💓 Bot is running normally every 5m on Railway'); }
 
 async function strongEntrySignal() { const candles = await exchange.fetchOHLCV(symbol, '1m', undefined, 50); if (!candles || candles.length < 30) return false;
 
@@ -50,7 +50,7 @@ if (pnl >= TAKE_PROFIT || pnl <= STOP_LOSS) { await sellFullPosition(); } }
 
 async function botLoop() { await exchange.loadMarkets(); await sendTelegram('🥇 XAUT Sniper Scalper Started');
 
-while (true) { try { await sendHeartbeat();
+while (true) { await exchange.loadMarkets(); try { await sendHeartbeat();
 
 if (!inPosition) {
     const signal = await strongEntrySignal();
