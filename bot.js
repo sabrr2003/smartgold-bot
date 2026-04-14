@@ -8,7 +8,9 @@ let inPosition = false; let entryPrice = 0; let peakPnl = 0; let lastHeartbeat =
 
 async function sendTelegram(text) { const token = process.env.TELEGRAM_BOT_TOKEN; const chatId = process.env.TELEGRAM_CHAT_ID; if (!token || !chatId) return;
 
-const url = https://api.telegram.org/bot${token}/sendMessage; try { await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, text }) }); } catch (_) {} }
+const url = https://api.telegram.org/bot${token}/sendMessage;
+
+try { await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, text: text }) }); } catch (err) { console.log('telegram error', err.message); } }
 
 async function heartbeat() { const now = Date.now(); if (now - lastHeartbeat >= HEARTBEAT_MS) { lastHeartbeat = now; await sendTelegram('💓 FAST TRAILING BOT alive'); } }
 
