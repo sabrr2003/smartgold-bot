@@ -6,11 +6,19 @@ const SYMBOL = 'XAUT/USDT'; const LOOP_MS = 3000; const HEARTBEAT_MS = 5 * 60 * 
 
 let inPosition = false; let entryPrice = 0; let peakPnl = 0; let lastHeartbeat = 0;
 
-async function sendTelegram(text) { const token = process.env.TELEGRAM_BOT_TOKEN; const chatId = process.env.TELEGRAM_CHAT_ID; if (!token || !chatId) return;
+async function sendTelegram(text) { try { const token = process.env.TELEGRAM_BOT_TOKEN; const chatId = process.env.TELEGRAM_CHAT_ID; if (!token || !chatId) return;
 
-const url = https://api.telegram.org/bot${token}/sendMessage;
+const url = 'https://api.telegram.org/bot' + token + '/sendMessage';
+await fetch(url, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    chat_id: chatId,
+    text: text
+  })
+});
 
-try { await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, text: text }) }); } catch (err) { console.log('telegram error', err.message); } }
+} catch (err) { console.log('telegram error', err.message); } }
 
 async function heartbeat() { const now = Date.now(); if (now - lastHeartbeat >= HEARTBEAT_MS) { lastHeartbeat = now; await sendTelegram('💓 FAST TRAILING BOT alive'); } }
 
@@ -18,23 +26,25 @@ async function getSignal() { const candles = await exchange.fetchOHLCV(SYMBOL, '
 
 const ma5 = closes.slice(-5).reduce((a, b) => a + b, 0) / 5; const ma20 = closes.slice(-20).reduce((a, b) => a + b, 0) / 20; const last = closes[closes.length - 1]; const prev = closes[closes.length - 2]; const avgVol = vols.slice(-10).reduce((a, b) => a + b, 0) / 10; const lastVol = vols[vols.length - 1];
 
-return ( ma5 > ma20 && last > prev && lastVol > avgVol * 1.2 && last > Math.max(...highs.slice(-6, -1)) ); }
+const trend = ma5 > ma20; const momentum = last > prev; const volume = lastVol > avgVol * 1.2; const breakout = last > Math.max(...highs.slice(-6, -1));
 
-async function buyAll() { const balance = await exchange.fetchBalance(); const usdt = Number(balance.free?.USDT || 0); if (usdt <= 1) return;
+return trend && momentum && volume && breakout; }
+
+async function buyAll() { const balance = await exchange.fetchBalance(); const usdt = Number(balance.free.USDT || 0); if (usdt <= 1) return;
 
 const ticker = await exchange.fetchTicker(SYMBOL); const amount = exchange.amountToPrecision(SYMBOL, usdt / ticker.last);
 
 await exchange.createMarketBuyOrder(SYMBOL, amount); inPosition = true; entryPrice = ticker.last; peakPnl = 0;
 
-await sendTelegram(🚀 FULL BUY ${SYMBOL} @ ${entryPrice}); }
+await sendTelegram('🚀 FULL BUY ' + SYMBOL + ' @ ' + entryPrice); }
 
-async function sellAll(reason) { const balance = await exchange.fetchBalance(); const base = SYMBOL.split('/')[0]; let amount = Number(balance.free?.[base] || 0); if (amount <= 0) return;
+async function sellAll(reason) { const balance = await exchange.fetchBalance(); const base = SYMBOL.split('/')[0]; let amount = Number(balance.free[base] || 0); if (amount <= 0) return;
 
 amount = exchange.amountToPrecision(SYMBOL, amount); await exchange.createMarketSellOrder(SYMBOL, amount);
 
 inPosition = false; entryPrice = 0; peakPnl = 0;
 
-await sendTelegram(✅ FULL SELL ${SYMBOL} | ${reason}); }
+await sendTelegram('✅ FULL SELL ' + SYMBOL + ' | ' + reason); }
 
 async function manageTrade() { if (!inPosition) return;
 
@@ -42,9 +52,9 @@ const ticker = await exchange.fetchTicker(SYMBOL); const pnl = ((ticker.last - e
 
 if (pnl > peakPnl) peakPnl = pnl;
 
-if (pnl <= STOP_LOSS) { await sellAll(SL ${pnl.toFixed(2)}%); return; }
+if (pnl <= STOP_LOSS) { await sellAll('SL ' + pnl.toFixed(2) + '%'); return; }
 
-if (peakPnl >= PROFIT_TRIGGER) { const trailLevel = peakPnl - TRAILING_DROP; if (pnl <= trailLevel) { await sellAll(TRAIL ${pnl.toFixed(2)}%); } } }
+if (peakPnl >= PROFIT_TRIGGER) { const trailLevel = peakPnl - TRAILING_DROP; if (pnl <= trailLevel) { await sellAll('TRAIL ' + pnl.toFixed(2) + '%'); } } }
 
 async function main() { await exchange.loadMarkets(); await sendTelegram('🥇 FAST TRAILING FINAL STARTED');
 
