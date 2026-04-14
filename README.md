@@ -1,0 +1,1 @@
+# smartgold-bot
