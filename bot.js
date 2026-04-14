@@ -57,6 +57,16 @@ const bullishTrend = ema5 > ema20; const volumeSpike = lastVol > avgVol * 1.2; c
 
 return bullishTrend && volumeSpike && breakout && momentum; }
 
+// ✅ Telegram heartbeat every 10 minutes let lastHeartbeat = 0;
+
+async function sendHeartbeat(fetchFn) { const now = Date.now(); if (now - lastHeartbeat < 10 * 60 * 1000) return;
+
+lastHeartbeat = now;
+
+const token = process.env.TELEGRAM_BOT_TOKEN; const chatId = process.env.TELEGRAM_CHAT_ID; if (!token || !chatId) return;
+
+try { await fetchFn(https://api.telegram.org/bot${token}/sendMessage, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chat_id: chatId, text: '💓 Bot heartbeat: still running on Railway', }), }); } catch (e) { console.error('heartbeat telegram error', e.message); } }
+
 // ✅ Main loop example async function botLoop(exchange) { while (true) { try { await checkTakeProfit(exchange); console.log('🔥 smart heartbeat'); } catch (e) { console.error('loop error', e.message); }
 
 await new Promise(r => setTimeout(r, 3000));
