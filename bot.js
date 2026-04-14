@@ -1,4 +1,6 @@
-const ccxt = require('ccxt');
+// package.json { "name": "telegram-railway-bot", "version": "1.0.0", "main": "bot.js", "scripts": { "start": "node bot.js" }, "dependencies": { "ccxt": "^4.4.82" } }
+
+// bot.js const ccxt = require('ccxt');
 
 const exchange = new ccxt.okx({ apiKey: process.env.OKX_API_KEY, secret: process.env.OKX_SECRET, password: process.env.OKX_PASSPHRASE, enableRateLimit: true, options: { defaultType: 'spot' } });
 
@@ -12,10 +14,7 @@ const url = 'https://api.telegram.org/bot' + token + '/sendMessage';
 await fetch(url, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    chat_id: chatId,
-    text: text
-  })
+  body: JSON.stringify({ chat_id: chatId, text })
 });
 
 } catch (err) { console.log('telegram error', err.message); } }
@@ -24,7 +23,7 @@ async function heartbeat() { const now = Date.now(); if (now - lastHeartbeat >= 
 
 async function getSignal() { const candles = await exchange.fetchOHLCV(SYMBOL, '1m', undefined, 30); const closes = candles.map(c => c[4]); const highs = candles.map(c => c[2]); const vols = candles.map(c => c[5]);
 
-const ma5 = closes.slice(-5).reduce((a, b) => a + b, 0) / 5; const ma20 = closes.slice(-20).reduce((a, b) => a + b, 0) / 20; const last = closes[closes.length - 1]; const prev = closes[closes.length - 2]; const avgVol = vols.slice(-10).reduce((a, b) => a + b, 0) / 10; const lastVol = vols[vols.length - 1];
+const ma5 = closes.slice(-5).reduce((a, b) => a + b, 0) / 5; const ma20 = closes.slice(-20).reduce((a, b) => a + b, 0) / 20; const last = closes.at(-1); const prev = closes.at(-2); const avgVol = vols.slice(-10).reduce((a, b) => a + b, 0) / 10; const lastVol = vols.at(-1);
 
 const trend = ma5 > ma20; const momentum = last > prev; const volume = lastVol > avgVol * 1.2; const breakout = last > Math.max(...highs.slice(-6, -1));
 
@@ -32,7 +31,7 @@ return trend && momentum && volume && breakout; }
 
 async function buyAll() { const balance = await exchange.fetchBalance(); const usdt = Number(balance.free.USDT || 0); if (usdt <= 1) return;
 
-const ticker = await exchange.fetchTicker(SYMBOL); const amount = exchange.amountToPrecision(SYMBOL, usdt / ticker.last);
+const ticker = await exchange.fetchTicker(SYMBOL); let amount = usdt / ticker.last; amount = Number(exchange.amountToPrecision(SYMBOL, amount)); if (amount <= 0) return;
 
 await exchange.createMarketBuyOrder(SYMBOL, amount); inPosition = true; entryPrice = ticker.last; peakPnl = 0;
 
@@ -40,7 +39,9 @@ await sendTelegram('🚀 FULL BUY ' + SYMBOL + ' @ ' + entryPrice); }
 
 async function sellAll(reason) { const balance = await exchange.fetchBalance(); const base = SYMBOL.split('/')[0]; let amount = Number(balance.free[base] || 0); if (amount <= 0) return;
 
-amount = exchange.amountToPrecision(SYMBOL, amount); await exchange.createMarketSellOrder(SYMBOL, amount);
+amount = Number(exchange.amountToPrecision(SYMBOL, amount)); if (amount <= 0) return;
+
+await exchange.createMarketSellOrder(SYMBOL, amount);
 
 inPosition = false; entryPrice = 0; peakPnl = 0;
 
