@@ -6,19 +6,18 @@ const {
   LAMPORTS_PER_SOL
 } = require("@solana/web3.js");
 const bs58 = require("bs58");
-const TelegramBot = require("node-telegram-bot-api");
 
 // ===============================
-// 🔐 CONFIG
+// 🔐 CONFIG (تم وضع مفاتيحك هنا)
 // ===============================
 const CONFIG = {
-  // تم وضع مفتاحك الخاص هنا مباشرة
+  // مفتاح المحفظة الخاص بك
   PRIVATE_KEY: "46UmsCPrM8M4tN4X3G6MvN5fN2W6kG6E9fD6f9L5fJ4n7b8V6C5x4z3a2S1qP",
 
-  // تم وضع رابط Helius الخاص بك هنا
+  // رابط Helius RPC الخاص بك
   SOLANA_RPC_URL: "https://mainnet.helius-rpc.com/?api-key=b24fa717-c2d7-425d-9b3e-9b4df931c04f",
 
-  // ضع هنا التوكن والمعرف الخاص بتليجرام
+  // ضع هنا توكن التليجرام إذا كنت تريد استلام الإشعارات
   TELEGRAM_BOT_TOKEN: "",
   TELEGRAM_CHAT_ID: "",
 
@@ -32,21 +31,26 @@ const CONFIG = {
 };
 
 // ===============================
-// TELEGRAM
+// TELEGRAM (إرسال الإشعارات)
 // ===============================
-const bot = new TelegramBot(CONFIG.TELEGRAM_BOT_TOKEN, {
-  polling: false
-});
-
 async function sendTelegram(message) {
   try {
     if (!CONFIG.TELEGRAM_BOT_TOKEN || !CONFIG.TELEGRAM_CHAT_ID) {
-        console.log("Telegram output:", message);
-        return;
+      console.log("LOG:", message);
+      return;
     }
-    await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, message);
+
+    await axios.post(
+      `https://api.telegram.org/bot${CONFIG.TELEGRAM_BOT_TOKEN}/sendMessage`,
+      {
+        chat_id: CONFIG.TELEGRAM_CHAT_ID,
+        text: message
+      }
+    );
+
+    console.log("📩 telegram sent:", message);
   } catch (e) {
-    console.error("telegram error:", e.message);
+    console.error("❌ telegram failed:", e.message);
   }
 }
 
@@ -54,46 +58,33 @@ async function sendTelegram(message) {
 // PRIVATE KEY PARSER
 // ===============================
 function parsePrivateKey(raw) {
-  if (!raw) throw new Error("PRIVATE_KEY is empty");
   const value = String(raw).trim();
 
-  try {
-    // JSON Format
-    if (value.startsWith("[")) {
-      const arr = JSON.parse(value);
-      return Uint8Array.from(arr);
-    }
-
-    // CSV Format
-    if (value.includes(",")) {
-      return Uint8Array.from(
-        value.replace(/،/g, ",").split(",").map((n) => Number(n.trim()))
-      );
-    }
-
-    // Base58 Format (Most common)
-    const decoded = bs58.decode(value);
-    
-    if (decoded.length === 64 || decoded.length === 32) {
-      return decoded;
-    }
-    
-    throw new Error(`Invalid length: ${decoded.length}`);
-  } catch (err) {
-    throw new Error("bad secret key size or invalid format");
+  if (value.startsWith("[")) {
+    return Uint8Array.from(JSON.parse(value));
   }
+
+  if (value.includes(",")) {
+    return Uint8Array.from(
+      value.replace(/،/g, ",")
+        .split(",")
+        .map(n => Number(n.trim()))
+    );
+  }
+
+  const decoded = bs58.decode(value);
+  if (decoded.length === 64) return decoded;
+  if (decoded.length === 32) {
+    return Keypair.fromSeed(decoded).secretKey;
+  }
+
+  throw new Error("bad secret key size");
 }
 
 function loadWallet() {
   try {
     const secret = parsePrivateKey(CONFIG.PRIVATE_KEY);
-    // إذا كان الطول 32، نحوله إلى 64 (Keypair الكامل)
-    let wallet;
-    if (secret.length === 32) {
-        wallet = Keypair.fromSeed(secret);
-    } else {
-        wallet = Keypair.fromSecretKey(secret);
-    }
+    const wallet = Keypair.fromSecretKey(secret);
     console.log("✅ wallet loaded:", wallet.publicKey.toBase58());
     return wallet;
   } catch (e) {
@@ -103,7 +94,7 @@ function loadWallet() {
 }
 
 // ===============================
-// SOLANA
+// SOLANA CONNECTION
 // ===============================
 const connection = new Connection(CONFIG.SOLANA_RPC_URL, "confirmed");
 const wallet = loadWallet();
@@ -120,7 +111,7 @@ function passesFilters(token) {
 }
 
 // ===============================
-// REAL BUY
+// REAL BUY ENGINE (JUPITER)
 // ===============================
 async function executeBuy(token) {
   try {
@@ -133,51 +124,51 @@ async function executeBuy(token) {
     const sol = balance / LAMPORTS_PER_SOL;
 
     if (sol < CONFIG.BUY_SOL_AMOUNT + CONFIG.KEEP_FEE_SOL) {
-      await sendTelegram(`⚠️ insufficient SOL balance: ${sol.toFixed(4)}`);
+      await sendTelegram(`⚠️ الرصيد غير كافٍ: ${sol.toFixed(4)} SOL`);
       return;
     }
 
     const amount = Math.floor(CONFIG.BUY_SOL_AMOUNT * LAMPORTS_PER_SOL);
 
+    // Get Quote from Jupiter
     const quote = await axios.get("https://quote-api.jup.ag/v6/quote", {
-        params: {
-          inputMint: "So11111111111111111111111111111111111111112",
-          outputMint: token.mint,
-          amount,
-          slippageBps: CONFIG.SLIPPAGE_BPS
-        }
+      params: {
+        inputMint: "So11111111111111111111111111111111111111112",
+        outputMint: token.mint,
+        amount,
+        slippageBps: CONFIG.SLIPPAGE_BPS
+      }
     });
 
+    // Build Swap Transaction
     const swap = await axios.post("https://quote-api.jup.ag/v6/swap", {
-        quoteResponse: quote.data,
-        userPublicKey: wallet.publicKey.toBase58(),
-        wrapAndUnwrapSol: true
+      quoteResponse: quote.data,
+      userPublicKey: wallet.publicKey.toBase58(),
+      wrapAndUnwrapSol: true
     });
 
     const tx = VersionedTransaction.deserialize(
       Buffer.from(swap.data.swapTransaction, "base64")
     );
 
+    // Sign and Send
     tx.sign([wallet]);
-
     const sig = await connection.sendTransaction(tx, {
       maxRetries: 3
     });
 
-    await sendTelegram(`🚀 REAL BUY ${token.symbol}\n🔗 https://solscan.io/tx/${sig}`);
+    await sendTelegram(`🚀 تم الشراء بنجاح للعملة ${token.symbol}\n🔗 https://solscan.io/tx/${sig}`);
   } catch (e) {
     await sendTelegram("❌ buy error: " + (e.response?.data?.error || e.message));
   }
 }
 
 // ===============================
-// DEX SCANNER (Simplified Example)
+// DEX SCANNER
 // ===============================
 async function scanDex() {
   try {
-    console.log("🧠 scanning DEX Solana...");
-    
-    // هذا مثال تجريبي لعملة BONK، ليعمل البوت فعلياً يجب ربطه بمصدر بيانات مباشر
+    // محاكاة البحث عن عملة جديدة (يمكنك ربط هذا الجزء بـ DexScreener API لاحقاً)
     const token = {
       symbol: "BONK",
       mint: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6a9k7gW5Cw7YaB1p",
@@ -198,15 +189,18 @@ async function scanDex() {
 // START
 // ===============================
 async function start() {
-  await sendTelegram("🔥 SMART GOLD BOT STARTED WITH HELIUS RPC");
+  await sendTelegram("🔥 بوت الذهب الذكي بدأ العمل مع Helius RPC");
 
   if (wallet) {
     const balance = await connection.getBalance(wallet.publicKey);
     await sendTelegram(
-      `✅ wallet loaded\n👛 ${wallet.publicKey.toBase58()}\n💰 ${balance / LAMPORTS_PER_SOL} SOL`
+      `✅ المحفظة جاهزة\n👛 العنوان: ${wallet.publicKey.toBase58()}\n💰 الرصيد: ${balance / LAMPORTS_PER_SOL} SOL`
     );
+  } else {
+    await sendTelegram("⚠️ فشل في تهيئة المحفظة عند البدء");
   }
 
+  // الفحص كل 20 ثانية
   setInterval(scanDex, 20000);
 }
 
