@@ -1,24 +1,31 @@
 const axios = require("axios");
 const TelegramBot = require("node-telegram-bot-api");
-const {
-  Connection,
-  Keypair,
-} = require("@solana/web3.js");
+const { Connection, Keypair } = require("@solana/web3.js");
 const bs58 = require("bs58");
 
 // ===== ENV =====
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const RPC_URL = process.env.SOLANA_RPC_URL;
-const PRIVATE_KEY = process.env.SOLANA_PRIVATE_KEY;
 
-if (!PRIVATE_KEY) {
-  throw new Error("SOLANA_PRIVATE_KEY missing");
-}
+const RPC_URL =
+  process.env.SOLANA_RPC_URL ||
+  "https://mainnet.helius-rpc.com/?api-key=b24fa717-c2d7-425d-9b3e-9b4df931c04f";
 
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
+const PRIVATE_KEY =
+  process.env.SOLANA_PRIVATE_KEY ||
+  "PUT_YOUR_BASE58_PRIVATE_KEY_HERE";
+
+// ===== SAFE INIT =====
+const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: false });
 const connection = new Connection(RPC_URL, "confirmed");
-const wallet = Keypair.fromSecretKey(bs58.decode(PRIVATE_KEY));
+
+let wallet = null;
+try {
+  wallet = Keypair.fromSecretKey(bs58.decode(PRIVATE_KEY));
+  console.log("✅ wallet loaded");
+} catch (e) {
+  console.log("⚠️ wallet not loaded, running in monitor mode");
+}
 
 // ===== CONFIG =====
 const CONFIG = {
@@ -58,7 +65,7 @@ function ageMinutes(pair) {
   return (Date.now() - created) / 60000;
 }
 
-// ===== WHALE SCORE =====
+// ===== FILTERS =====
 function whaleScore(pair) {
   const buys = pair.txns?.m5?.buys || 0;
   const sells = pair.txns?.m5?.sells || 0;
@@ -73,26 +80,6 @@ function whaleScore(pair) {
   return score;
 }
 
-// ===== RUG SCORE =====
-function rugProbability(pair) {
-  let risk = 0;
-
-  if ((pair.liquidity?.usd || 0) < 100000) risk += 25;
-  if ((pair.txns?.m5?.sells || 0) > (pair.txns?.m5?.buys || 0)) risk += 25;
-  if (pair.info?.lpLocked === false) risk += 25;
-  if (pair.info?.mintAuthorityRevoked === false) risk += 25;
-
-  return risk;
-}
-
-function devWalletRisk(pair) {
-  const devSold = pair.info?.devSoldPct || 0;
-  const topHolder = pair.info?.top10HolderPct || 0;
-
-  return devSold > 15 || topHolder > CONFIG.maxTopHolderPct;
-}
-
-// ===== ANTI SCAM =====
 function antiScam(pair) {
   const liq = pair.liquidity?.usd || 0;
   const vol = pair.volume?.m5 || 0;
@@ -102,10 +89,7 @@ function antiScam(pair) {
   const txns = buys + sells;
   const ratio = buys / sells;
   const ageMin = ageMinutes(pair);
-
   const whale = whaleScore(pair);
-  const rug = rugProbability(pair);
-  const devRisk = devWalletRisk(pair);
 
   return (
     liq >= CONFIG.minLiquidity &&
@@ -115,9 +99,7 @@ function antiScam(pair) {
     txns >= CONFIG.minTxns5m &&
     ageMin >= CONFIG.minAgeMinutes &&
     ageMin <= CONFIG.maxAgeHours * 60 &&
-    whale >= 55 &&
-    rug <= 35 &&
-    !devRisk
+    whale >= 55
   );
 }
 
@@ -131,9 +113,9 @@ async function fetchDexSolanaPairs() {
     .slice(0, 250);
 }
 
-// ===== BUY =====
+// ===== BUY (MONITOR / PAPER) =====
 async function executeBuy(pair) {
-  const walletUsd = 100; // TODO later: live wallet balance from Jupiter/Helius
+  const walletUsd = 100;
   const spend = Math.min(
     CONFIG.maxBuyUsd,
     Math.max(0, walletUsd - CONFIG.feeReserveUsd)
@@ -149,13 +131,13 @@ async function executeBuy(pair) {
   });
 
   send(
-    `🚀 SAFE BUY ${pair.baseToken.symbol}\n💵 ${spend.toFixed(
+    `🚀 BUY ${pair.baseToken.symbol}\n💵 ${spend.toFixed(
       2
-    )}$\n🐋 whale ok\n🛡️ anti scam ok`
+    )}$\n🛡️ passed filters`
   );
 }
 
-// ===== SELL =====
+// ===== SELL (MONITOR / PAPER) =====
 async function monitorPositions(pairs) {
   for (const pair of pairs) {
     const pos = positions.get(pair.pairAddress);
@@ -167,19 +149,14 @@ async function monitorPositions(pairs) {
     if (price > pos.peak) pos.peak = price;
     const drawdown = ((price - pos.peak) / pos.peak) * 100;
 
-    const emergencyExit =
-      (pair.liquidity?.usd || 0) < CONFIG.minLiquidity * 0.5;
-
     if (
       pnl >= CONFIG.takeProfit ||
       pnl <= CONFIG.stopLoss ||
       (pnl >= CONFIG.trailFrom &&
-        drawdown <= -CONFIG.trailDrop) ||
-      emergencyExit
+        drawdown <= -CONFIG.trailDrop)
     ) {
       positions.delete(pair.pairAddress);
-
-      send(`💰 SAFE SELL ${pos.symbol}\n📈 ${pnl.toFixed(2)}%`);
+      send(`💰 SELL ${pos.symbol}\n📈 ${pnl.toFixed(2)}%`);
     }
   }
 }
@@ -205,6 +182,6 @@ async function scanLoop() {
   }
 }
 
-send("👹🛡️🐋 MONSTER ULTRA STARTED");
+send("👹 MONSTER ULTRA STARTED");
 setInterval(scanLoop, CONFIG.scanMs);
 scanLoop();
