@@ -1,15 +1,13 @@
 {
-  "name": "gold-fast-trailing-bot",
+  "name": "dex-solana-real-bot",
   "version": "1.0.0",
-  "description": "Fast trailing XAUT bot for OKX Railway",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
   },
   "dependencies": {
-    "ccxt": "^4.4.82"
-  },
-  "engines": {
-    "node": ">=18"
+    "@solana/web3.js": "^1.95.3",
+    "bs58": "^5.0.0",
+    "crypto-js": "^4.2.0"
   }
 }
