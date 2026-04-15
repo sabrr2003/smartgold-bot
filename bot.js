@@ -1,7 +1,19 @@
-// CRYPTO MEME HUNTER BOT - CLEAN FULL VERSION FOR RAILWAY + OKX
-const ccxt = require('ccxt');
+// ===============================
+// CRYPTO MEME HUNTER BOT
+// COPY-READY CLEAN VERSION
+// Railway + OKX + KeepAlive
+// ===============================
 
-// ===== OKX API KEYS =====
+const ccxt = require('ccxt');
+const http = require('http');
+
+// ===== Railway Keep Alive =====
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('BOT LIVE');
+}).listen(process.env.PORT || 3000);
+
+// ===== API KEYS =====
 const OKX_API_KEY = process.env.OKX_API_KEY || 'PUT_API_KEY_HERE';
 const OKX_SECRET = process.env.OKX_SECRET || 'PUT_SECRET_HERE';
 const OKX_PASSPHRASE = process.env.OKX_PASSPHRASE || 'PUT_PASSPHRASE_HERE';
@@ -14,14 +26,8 @@ const exchange = new ccxt.okx({
   options: { defaultType: 'spot' }
 });
 
-// ONLY meme/alt symbols - NO GOLD
-const SYMBOLS = [
-  'DOGE/USDT',
-  'PEPE/USDT',
-  'SOL/USDT',
-  'BONK/USDT'
-];
-
+// ===== SETTINGS =====
+const SYMBOLS = ['DOGE/USDT', 'PEPE/USDT', 'SOL/USDT', 'BONK/USDT'];
 const LOOP_MS = 5000;
 const HEARTBEAT_MS = 5 * 60 * 1000;
 const ENTRY_BALANCE_USE = 0.95;
@@ -93,6 +99,7 @@ async function scanBestSymbol() {
 async function buyFull(symbol) {
   const balance = await exchange.fetchBalance();
   const usdt = Number(balance.free.USDT || 0) * ENTRY_BALANCE_USE;
+
   if (usdt < 5) {
     console.log('⚠️ no enough USDT');
     return;
@@ -103,14 +110,12 @@ async function buyFull(symbol) {
 
   let amount = usdt / price;
   amount = Number(exchange.amountToPrecision(symbol, amount));
+
   if (!amount || amount <= 0) return;
 
   await exchange.createMarketBuyOrder(symbol, amount);
 
-  position = {
-    symbol,
-    entry: price
-  };
+  position = { symbol, entry: price };
   peakPnl = 0;
 
   console.log(`🚀 FULL BUY ${symbol} @ ${price}`);
@@ -175,9 +180,7 @@ async function main() {
 
       if (!position) {
         const symbol = await scanBestSymbol();
-        if (symbol) {
-          await buyFull(symbol);
-        }
+        if (symbol) await buyFull(symbol);
       } else {
         await manageOpenPosition();
       }
