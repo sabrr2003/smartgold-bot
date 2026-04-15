@@ -1,11 +1,14 @@
 {
-  "name": "okx-real-spot-bot",
+  "name": "smartgold-bot",
   "version": "1.0.0",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
   },
   "dependencies": {
-    "ccxt": "^4.4.80"
+    "@solana/web3.js": "^1.95.3",
+    "axios": "^1.7.2",
+    "bs58": "^6.0.0",
+    "node-telegram-bot-api": "^0.66.0"
   }
 }
