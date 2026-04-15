@@ -1,6 +1,6 @@
 const axios = require("axios");
 const bs58 = require("bs58");
-const { Keypair, Connection, PublicKey } = require("@solana/web3.js");
+const { Connection, Keypair } = require("@solana/web3.js");
 
 // ================= CONFIG =================
 const RPC_URL =
@@ -8,29 +8,43 @@ const RPC_URL =
   "https://mainnet.helius-rpc.com/?api-key=YOUR_KEY";
 
 const PRIVATE_KEY = process.env.SOLANA_PRIVATE_KEY || "";
-const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
+
+const BUY_AMOUNT_USD = 8.8; // يخلي 1.2$ رسوم
+const FEE_RESERVE = 1.2;
+const MIN_VOLUME = 50000;
+const MIN_LIQUIDITY = 30000;
+const TAKE_PROFIT = 25;
+const STOP_LOSS = 10;
 
 const connection = new Connection(RPC_URL, "confirmed");
 
 // ================= TELEGRAM =================
-async function sendTelegram(msg) {
-  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
-
+async function sendTelegram(message) {
   try {
-    await axios.post(
-      `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
-      {
-        chat_id: TELEGRAM_CHAT_ID,
-        text: msg,
-      }
+    if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) {
+      console.log("❌ Telegram vars missing");
+      return;
+    }
+
+    const url = `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`;
+
+    const res = await axios.post(url, {
+      chat_id: TELEGRAM_CHAT_ID,
+      text: message,
+    });
+
+    console.log("✅ Telegram sent:", res.data.ok);
+  } catch (error) {
+    console.log(
+      "❌ Telegram error:",
+      error.response?.data || error.message
     );
-  } catch (e) {
-    console.log("Telegram error:", e.message);
   }
 }
 
-// ================= WALLET LOAD =================
+// ================= WALLET =================
 let wallet = null;
 
 try {
@@ -49,21 +63,15 @@ try {
   console.log("✅ wallet loaded successfully");
   console.log("Wallet:", wallet.publicKey.toBase58());
 
-  sendTelegram(`✅ WALLET LOADED\n${wallet.publicKey.toBase58()}`);
+  sendTelegram(
+    `✅ Wallet loaded\n${wallet.publicKey.toBase58()}`
+  );
 } catch (e) {
   console.log("⚠️ wallet not loaded:", e.message);
-  sendTelegram(`⚠️ Monitor mode only\n${e.message}`);
+  sendTelegram(`⚠️ monitor mode\n${e.message}`);
 }
 
-// ================= BUY SETTINGS =================
-const BUY_AMOUNT_USD = 8.8; // يخلي 1.2$ رسوم احتياط
-const FEE_RESERVE = 1.2;
-const MIN_VOLUME = 50000;
-const MIN_LIQUIDITY = 30000;
-const TAKE_PROFIT = 25;
-const STOP_LOSS = 10;
-
-// ================= TOKEN FILTER =================
+// ================= FILTER =================
 function isGoodToken(token) {
   if (!token) return false;
 
@@ -81,49 +89,59 @@ function isGoodToken(token) {
   return true;
 }
 
-// ================= BUY FUNCTION =================
-async function buyToken(tokenAddress, symbol) {
-  if (!wallet) {
-    console.log("⚠️ monitor mode - no wallet");
-    return;
-  }
-
+// ================= BUY =================
+async function buyToken(token) {
   try {
-    console.log(`🚀 BUY ${symbol}`);
-    await sendTelegram(`🚀 REAL BUY ${symbol}`);
+    if (!wallet) {
+      console.log("⚠️ monitor mode - no wallet");
+      return;
+    }
 
-    // هنا تربط Jupiter swap الحقيقي
-    // swap transaction goes here
+    console.log(`🚀 BUY ${token.symbol}`);
+    await sendTelegram(`🚀 BUY ${token.symbol}`);
+
+    // =========================
+    // هنا تخلي Jupiter swap الحقيقي
+    // =========================
 
   } catch (e) {
     console.log("BUY ERROR:", e.message);
-    await sendTelegram(`❌ BUY ERROR ${symbol}\n${e.message}`);
+    await sendTelegram(
+      `❌ BUY ERROR ${token.symbol}\n${e.message}`
+    );
   }
 }
 
-// ================= DEX SCANNER =================
+// ================= SCANNER =================
 async function scanDex() {
   try {
     console.log("🧠 scanning DEX Solana...");
 
-    // هنا تجيب توكنات DEX من API
-    // مثال Jupiter / Birdeye / Dexscreener
-
-    const fakeTokens = [
+    // مؤقتًا توكنات تجريبية
+    const tokens = [
       {
         symbol: "PUMP",
-        address: "token123",
+        address: "token1",
         volume24h: 90000,
-        liquidity: 60000,
-        ageMinutes: 10,
+        liquidity: 70000,
+        ageMinutes: 15,
         buys5m: 40,
         sells5m: 10,
       },
+      {
+        symbol: "DOGE2",
+        address: "token2",
+        volume24h: 20000,
+        liquidity: 5000,
+        ageMinutes: 1,
+        buys5m: 2,
+        sells5m: 4,
+      },
     ];
 
-    for (const token of fakeTokens) {
+    for (const token of tokens) {
       if (isGoodToken(token)) {
-        await buyToken(token.address, token.symbol);
+        await buyToken(token);
       }
     }
   } catch (e) {
@@ -133,7 +151,13 @@ async function scanDex() {
 }
 
 // ================= START =================
-console.log("🔥 SMART GOLD BOT STARTED");
-sendTelegram("🔥 SMART GOLD BOT STARTED");
+(async () => {
+  console.log("🔥 SMART GOLD BOT STARTED");
+  await sendTelegram("🔥 SMART GOLD BOT STARTED");
 
-setInterval(scanDex, 15000);
+  await scanDex();
+
+  setInterval(async () => {
+    await scanDex();
+  }, 15000);
+})();
