@@ -1,40 +1,52 @@
-const axios = require("axios");
-const bs58Module = require("bs58");
-const bs58 = bs58Module.default || bs58Module;
-const { Keypair, Connection } = require("@solana/web3.js");
+require("dotenv").config();
 
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim();
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID?.trim();
-const SOLANA_PRIVATE_KEY = process.env.SOLANA_PRIVATE_KEY?.trim();
-const SOLANA_RPC_URL =
-  process.env.SOLANA_RPC_URL?.trim() ||
+const axios = require("axios");
+const bs58 = require("bs58");
+const {
+  Connection,
+  Keypair,
+  PublicKey,
+} = require("@solana/web3.js");
+
+// =========================
+// ENV
+// =========================
+const RPC =
+  process.env.SOLANA_RPC_URL ||
   "https://api.mainnet-beta.solana.com";
 
-const connection = new Connection(SOLANA_RPC_URL, "confirmed");
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+
+const connection = new Connection(RPC, "confirmed");
 
 let wallet = null;
 
-// ================= TELEGRAM =================
-async function sendTelegram(msg) {
-  try {
-    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+// =========================
+// TELEGRAM
+// =========================
+async function sendTelegram(message) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
 
+  try {
     await axios.post(
       `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
       {
         chat_id: TELEGRAM_CHAT_ID,
-        text: msg,
+        text: message,
       }
     );
   } catch (e) {
-    console.log("telegram error:", e.message);
+    console.log("Telegram error:", e.message);
   }
 }
 
-// ================= WALLET =================
+// =========================
+// WALLET LOADER
+// =========================
 function loadWallet() {
   try {
-    const pk = SOLANA_PRIVATE_KEY;
+    const pk = process.env.SOLANA_PRIVATE_KEY?.trim();
 
     if (!pk) {
       console.log("⚠️ wallet not loaded: missing private key");
@@ -43,77 +55,100 @@ function loadWallet() {
 
     let secret;
 
-    // أولاً نجرب JSON array
+    // JSON ARRAY
     try {
       secret = Uint8Array.from(JSON.parse(pk));
     } catch {
-      // إذا فشل نجرب Base58 بعد تنظيف المسافات
-      const cleanPk = pk.replace(/\s/g, "");
-      secret = Uint8Array.from(bs58.decode(cleanPk));
+      const clean = pk.replace(/\s/g, "");
+      secret = Uint8Array.from(bs58.decode(clean));
     }
 
-    wallet = Keypair.fromSecretKey(secret);
+    // دعم 32 و64
+    if (secret.length === 32) {
+      wallet = Keypair.fromSeed(secret);
+    } else if (secret.length === 64) {
+      wallet = Keypair.fromSecretKey(secret);
+    } else {
+      throw new Error(`invalid key length ${secret.length}`);
+    }
 
-    console.log("💰 wallet loaded:", wallet.publicKey.toBase58());
+    console.log(
+      "💰 wallet loaded:",
+      wallet.publicKey.toBase58()
+    );
+
     return wallet;
   } catch (e) {
-    console.log("⚠️ monitor mode", e.message);
+    console.log("⚠️ wallet not loaded:", e.message);
     return null;
   }
 }
 
-wallet = loadWallet();
-
-// ================= FILTER =================
-function strongFilter(token) {
-  return (
-    token.liquidity > 100000 &&
-    token.volume > 50000 &&
-    token.change > 5
-  );
-}
-
-// ================= SCANNER =================
-async function scanDexSolana() {
+// =========================
+// DEX SCANNER
+// =========================
+async function scanDex() {
   try {
     console.log("🧠 scanning DEX Solana...");
     await sendTelegram("🧠 scanning DEX Solana...");
 
-    // 🔥 مثال عملة جديدة (بدلها بربط API المنصة)
-    const token = {
-      symbol: "TEST",
-      price: 0.0012,
-      liquidity: 150000,
-      volume: 90000,
-      change: 12.5,
+    // حاليا محاكاة عملة جديدة
+    const fakeToken = {
+      symbol: "SMART",
+      mint:
+        "So11111111111111111111111111111111111111112",
+      liquidity: 50000,
+      volume: 120000,
     };
 
-    if (!strongFilter(token)) return;
+    const passed =
+      fakeToken.liquidity > 20000 &&
+      fakeToken.volume > 50000;
 
-    // monitor mode
-    if (!wallet) {
-      await sendTelegram("⚠️ monitor mode - wallet not loaded");
-      return;
-    }
+    if (!passed) return;
 
-    // REAL BUY PLACEHOLDER
-    console.log(`🚀 REAL BUY ${token.symbol} @ ${token.price}`);
-    await sendTelegram(
-      `🚀 REAL BUY ${token.symbol}\n💵 ${token.price}`
-    );
-
+    await executeBuy(fakeToken);
   } catch (e) {
     console.log("scan error:", e.message);
-    await sendTelegram(`❌ scan error ${e.message}`);
   }
 }
 
-// ================= MAIN =================
-async function main() {
+// =========================
+// BUY EXECUTION
+// =========================
+async function executeBuy(token) {
+  try {
+    if (!wallet) {
+      console.log("⚠️ monitor mode - wallet not loaded");
+      await sendTelegram(
+        "⚠️ monitor mode - wallet not loaded"
+      );
+      return;
+    }
+
+    console.log(`🚀 REAL BUY ${token.symbol}`);
+    await sendTelegram(
+      `🚀 REAL BUY ${token.symbol}\nMint: ${token.mint}`
+    );
+
+    // هنا لاحقاً نضيف Jupiter swap الحقيقي
+  } catch (e) {
+    console.log("buy error:", e.message);
+  }
+}
+
+// =========================
+// MAIN LOOP
+// =========================
+async function startBot() {
   console.log("🔥 SMART GOLD BOT STARTED");
   await sendTelegram("🔥 SMART GOLD BOT STARTED");
 
-  setInterval(scanDexSolana, 20000);
+  loadWallet();
+
+  setInterval(async () => {
+    await scanDex();
+  }, 20000);
 }
 
-main();
+startBot();
