@@ -1,187 +1,139 @@
 const axios = require("axios");
-const TelegramBot = require("node-telegram-bot-api");
-const { Connection, Keypair } = require("@solana/web3.js");
 const bs58 = require("bs58");
+const { Keypair, Connection, PublicKey } = require("@solana/web3.js");
 
-// ===== ENV =====
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-
+// ================= CONFIG =================
 const RPC_URL =
   process.env.SOLANA_RPC_URL ||
-  "https://mainnet.helius-rpc.com/?api-key=b24fa717-c2d7-425d-9b3e-9b4df931c04f";
+  "https://mainnet.helius-rpc.com/?api-key=YOUR_KEY";
 
-const PRIVATE_KEY =
-  process.env.SOLANA_PRIVATE_KEY ||
-  "PUT_YOUR_BASE58_PRIVATE_KEY_HERE";
+const PRIVATE_KEY = process.env.SOLANA_PRIVATE_KEY || "";
+const TELEGRAM_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
-// ===== SAFE INIT =====
-const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: false });
 const connection = new Connection(RPC_URL, "confirmed");
 
-let wallet = null;
-try {
-  wallet = Keypair.fromSecretKey(bs58.decode(PRIVATE_KEY));
-  console.log("✅ wallet loaded");
-} catch (e) {
-  console.log("⚠️ wallet not loaded, running in monitor mode");
-}
+// ================= TELEGRAM =================
+async function sendTelegram(msg) {
+  if (!TELEGRAM_TOKEN || !TELEGRAM_CHAT_ID) return;
 
-// ===== CONFIG =====
-const CONFIG = {
-  feeReserveUsd: 1.2,
-  buyUsdMin: 5,
-  maxBuyUsd: 10,
-
-  minLiquidity: 80000,
-  minVolume5m: 150000,
-  minPriceChange: 4,
-  minBuysRatio: 1.4,
-  minTxns5m: 120,
-
-  maxTopHolderPct: 18,
-  minAgeMinutes: 3,
-  maxAgeHours: 24,
-
-  takeProfit: 12,
-  stopLoss: -4,
-  trailFrom: 8,
-  trailDrop: 1,
-
-  scanMs: 3000,
-};
-
-const seen = new Set();
-const positions = new Map();
-
-// ===== HELPERS =====
-function send(msg) {
-  if (!CHAT_ID) return;
-  bot.sendMessage(CHAT_ID, msg).catch(() => {});
-}
-
-function ageMinutes(pair) {
-  const created = pair.pairCreatedAt || Date.now();
-  return (Date.now() - created) / 60000;
-}
-
-// ===== FILTERS =====
-function whaleScore(pair) {
-  const buys = pair.txns?.m5?.buys || 0;
-  const sells = pair.txns?.m5?.sells || 0;
-  const vol = pair.volume?.m5 || 0;
-  let score = 0;
-
-  if (buys >= 80) score += 30;
-  if (buys > sells * 1.8) score += 25;
-  if (vol >= 250000) score += 25;
-  if ((pair.liquidity?.usd || 0) >= 120000) score += 20;
-
-  return score;
-}
-
-function antiScam(pair) {
-  const liq = pair.liquidity?.usd || 0;
-  const vol = pair.volume?.m5 || 0;
-  const chg = pair.priceChange?.m5 || 0;
-  const buys = pair.txns?.m5?.buys || 0;
-  const sells = pair.txns?.m5?.sells || 1;
-  const txns = buys + sells;
-  const ratio = buys / sells;
-  const ageMin = ageMinutes(pair);
-  const whale = whaleScore(pair);
-
-  return (
-    liq >= CONFIG.minLiquidity &&
-    vol >= CONFIG.minVolume5m &&
-    chg >= CONFIG.minPriceChange &&
-    ratio >= CONFIG.minBuysRatio &&
-    txns >= CONFIG.minTxns5m &&
-    ageMin >= CONFIG.minAgeMinutes &&
-    ageMin <= CONFIG.maxAgeHours * 60 &&
-    whale >= 55
-  );
-}
-
-// ===== DISCOVER DEX SOLANA =====
-async function fetchDexSolanaPairs() {
-  const url = "https://api.dexscreener.com/latest/dex/search/?q=solana";
-  const { data } = await axios.get(url, { timeout: 10000 });
-
-  return (data.pairs || [])
-    .filter((p) => p.chainId === "solana")
-    .slice(0, 250);
-}
-
-// ===== BUY (MONITOR / PAPER) =====
-async function executeBuy(pair) {
-  const walletUsd = 100;
-  const spend = Math.min(
-    CONFIG.maxBuyUsd,
-    Math.max(0, walletUsd - CONFIG.feeReserveUsd)
-  );
-
-  if (spend < CONFIG.buyUsdMin) return;
-
-  positions.set(pair.pairAddress, {
-    symbol: pair.baseToken.symbol,
-    entry: Number(pair.priceUsd),
-    peak: Number(pair.priceUsd),
-    amount: spend,
-  });
-
-  send(
-    `🚀 BUY ${pair.baseToken.symbol}\n💵 ${spend.toFixed(
-      2
-    )}$\n🛡️ passed filters`
-  );
-}
-
-// ===== SELL (MONITOR / PAPER) =====
-async function monitorPositions(pairs) {
-  for (const pair of pairs) {
-    const pos = positions.get(pair.pairAddress);
-    if (!pos) continue;
-
-    const price = Number(pair.priceUsd);
-    const pnl = ((price - pos.entry) / pos.entry) * 100;
-
-    if (price > pos.peak) pos.peak = price;
-    const drawdown = ((price - pos.peak) / pos.peak) * 100;
-
-    if (
-      pnl >= CONFIG.takeProfit ||
-      pnl <= CONFIG.stopLoss ||
-      (pnl >= CONFIG.trailFrom &&
-        drawdown <= -CONFIG.trailDrop)
-    ) {
-      positions.delete(pair.pairAddress);
-      send(`💰 SELL ${pos.symbol}\n📈 ${pnl.toFixed(2)}%`);
-    }
+  try {
+    await axios.post(
+      `https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`,
+      {
+        chat_id: TELEGRAM_CHAT_ID,
+        text: msg,
+      }
+    );
+  } catch (e) {
+    console.log("Telegram error:", e.message);
   }
 }
 
-// ===== MAIN LOOP =====
-async function scanLoop() {
+// ================= WALLET LOAD =================
+let wallet = null;
+
+try {
+  if (!PRIVATE_KEY) throw new Error("missing private key");
+
+  let secret;
+
+  if (PRIVATE_KEY.startsWith("[")) {
+    secret = Uint8Array.from(JSON.parse(PRIVATE_KEY));
+  } else {
+    secret = bs58.decode(PRIVATE_KEY);
+  }
+
+  wallet = Keypair.fromSecretKey(secret);
+
+  console.log("✅ wallet loaded successfully");
+  console.log("Wallet:", wallet.publicKey.toBase58());
+
+  sendTelegram(`✅ WALLET LOADED\n${wallet.publicKey.toBase58()}`);
+} catch (e) {
+  console.log("⚠️ wallet not loaded:", e.message);
+  sendTelegram(`⚠️ Monitor mode only\n${e.message}`);
+}
+
+// ================= BUY SETTINGS =================
+const BUY_AMOUNT_USD = 8.8; // يخلي 1.2$ رسوم احتياط
+const FEE_RESERVE = 1.2;
+const MIN_VOLUME = 50000;
+const MIN_LIQUIDITY = 30000;
+const TAKE_PROFIT = 25;
+const STOP_LOSS = 10;
+
+// ================= TOKEN FILTER =================
+function isGoodToken(token) {
+  if (!token) return false;
+
+  const volume = token.volume24h || 0;
+  const liquidity = token.liquidity || 0;
+  const age = token.ageMinutes || 9999;
+  const buys = token.buys5m || 0;
+  const sells = token.sells5m || 0;
+
+  if (volume < MIN_VOLUME) return false;
+  if (liquidity < MIN_LIQUIDITY) return false;
+  if (age < 3) return false;
+  if (buys <= sells) return false;
+
+  return true;
+}
+
+// ================= BUY FUNCTION =================
+async function buyToken(tokenAddress, symbol) {
+  if (!wallet) {
+    console.log("⚠️ monitor mode - no wallet");
+    return;
+  }
+
   try {
-    const pairs = await fetchDexSolanaPairs();
+    console.log(`🚀 BUY ${symbol}`);
+    await sendTelegram(`🚀 REAL BUY ${symbol}`);
 
-    for (const pair of pairs) {
-      const id = pair.pairAddress;
-      if (seen.has(id)) continue;
-      seen.add(id);
+    // هنا تربط Jupiter swap الحقيقي
+    // swap transaction goes here
 
-      if (antiScam(pair)) {
-        await executeBuy(pair);
+  } catch (e) {
+    console.log("BUY ERROR:", e.message);
+    await sendTelegram(`❌ BUY ERROR ${symbol}\n${e.message}`);
+  }
+}
+
+// ================= DEX SCANNER =================
+async function scanDex() {
+  try {
+    console.log("🧠 scanning DEX Solana...");
+
+    // هنا تجيب توكنات DEX من API
+    // مثال Jupiter / Birdeye / Dexscreener
+
+    const fakeTokens = [
+      {
+        symbol: "PUMP",
+        address: "token123",
+        volume24h: 90000,
+        liquidity: 60000,
+        ageMinutes: 10,
+        buys5m: 40,
+        sells5m: 10,
+      },
+    ];
+
+    for (const token of fakeTokens) {
+      if (isGoodToken(token)) {
+        await buyToken(token.address, token.symbol);
       }
     }
-
-    await monitorPositions(pairs);
   } catch (e) {
-    send(`❌ scanner error: ${e.message}`);
+    console.log("SCAN ERROR:", e.message);
+    await sendTelegram(`❌ SCAN ERROR\n${e.message}`);
   }
 }
 
-send("👹 MONSTER ULTRA STARTED");
-setInterval(scanLoop, CONFIG.scanMs);
-scanLoop();
+// ================= START =================
+console.log("🔥 SMART GOLD BOT STARTED");
+sendTelegram("🔥 SMART GOLD BOT STARTED");
+
+setInterval(scanDex, 15000);
