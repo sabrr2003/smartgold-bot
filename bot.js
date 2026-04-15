@@ -1,192 +1,210 @@
-const ccxt = require("ccxt");
-const http = require("http");
-const fetch = global.fetch;
+const axios = require("axios");
+const TelegramBot = require("node-telegram-bot-api");
+const {
+  Connection,
+  Keypair,
+} = require("@solana/web3.js");
+const bs58 = require("bs58");
 
-// ===== TELEGRAM =====
+// ===== ENV =====
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const RPC_URL = process.env.SOLANA_RPC_URL;
+const PRIVATE_KEY = process.env.SOLANA_PRIVATE_KEY;
 
-async function sendTelegram(text) {
-  try {
-    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
-    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-    await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
-        text,
-      }),
-    });
-  } catch (e) {
-    console.log("telegram fail", e.message);
-  }
+if (!PRIVATE_KEY) {
+  throw new Error("SOLANA_PRIVATE_KEY missing");
 }
 
-// ===== KEEP ALIVE =====
-http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("BOT LIVE");
-}).listen(process.env.PORT || 3000);
+const bot = new TelegramBot(TELEGRAM_BOT_TOKEN);
+const connection = new Connection(RPC_URL, "confirmed");
+const wallet = Keypair.fromSecretKey(bs58.decode(PRIVATE_KEY));
 
-// ===== OKX SPOT =====
-const exchange = new ccxt.okx({
-  apiKey: process.env.OKX_API_KEY,
-  secret: process.env.OKX_SECRET,
-  password: process.env.OKX_PASSPHRASE,
-  enableRateLimit: true,
-  options: {
-    defaultType: "spot",
-  },
-});
+// ===== CONFIG =====
+const CONFIG = {
+  feeReserveUsd: 1.2,
+  buyUsdMin: 5,
+  maxBuyUsd: 10,
 
-// ===== SETTINGS =====
-const LOOP_MS = 4000;
-const USDT_RESERVE = 1; // leave 1$ for fees
-const FULL_BUY_PCT = 0.98;
-const STOP_LOSS_PCT = -2.0;
-const TRAIL_DROP_FROM_PEAK = 1.0;
+  minLiquidity: 80000,
+  minVolume5m: 150000,
+  minPriceChange: 4,
+  minBuysRatio: 1.4,
+  minTxns5m: 120,
 
-let pairs = [];
-let position = null;
-let peakPnl = 0;
+  maxTopHolderPct: 18,
+  minAgeMinutes: 3,
+  maxAgeHours: 24,
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
+  takeProfit: 12,
+  stopLoss: -4,
+  trailFrom: 8,
+  trailDrop: 1,
+
+  scanMs: 3000,
+};
+
+const seen = new Set();
+const positions = new Map();
+
+// ===== HELPERS =====
+function send(msg) {
+  if (!CHAT_ID) return;
+  bot.sendMessage(CHAT_ID, msg).catch(() => {});
 }
 
-async function loadPairs() {
-  const markets = await exchange.loadMarkets();
-  pairs = Object.keys(markets).filter(
-    (s) =>
-      s.endsWith("/USDT") &&
-      markets[s].spot &&
-      markets[s].active
+function ageMinutes(pair) {
+  const created = pair.pairCreatedAt || Date.now();
+  return (Date.now() - created) / 60000;
+}
+
+// ===== WHALE SCORE =====
+function whaleScore(pair) {
+  const buys = pair.txns?.m5?.buys || 0;
+  const sells = pair.txns?.m5?.sells || 0;
+  const vol = pair.volume?.m5 || 0;
+  let score = 0;
+
+  if (buys >= 80) score += 30;
+  if (buys > sells * 1.8) score += 25;
+  if (vol >= 250000) score += 25;
+  if ((pair.liquidity?.usd || 0) >= 120000) score += 20;
+
+  return score;
+}
+
+// ===== RUG SCORE =====
+function rugProbability(pair) {
+  let risk = 0;
+
+  if ((pair.liquidity?.usd || 0) < 100000) risk += 25;
+  if ((pair.txns?.m5?.sells || 0) > (pair.txns?.m5?.buys || 0)) risk += 25;
+  if (pair.info?.lpLocked === false) risk += 25;
+  if (pair.info?.mintAuthorityRevoked === false) risk += 25;
+
+  return risk;
+}
+
+function devWalletRisk(pair) {
+  const devSold = pair.info?.devSoldPct || 0;
+  const topHolder = pair.info?.top10HolderPct || 0;
+
+  return devSold > 15 || topHolder > CONFIG.maxTopHolderPct;
+}
+
+// ===== ANTI SCAM =====
+function antiScam(pair) {
+  const liq = pair.liquidity?.usd || 0;
+  const vol = pair.volume?.m5 || 0;
+  const chg = pair.priceChange?.m5 || 0;
+  const buys = pair.txns?.m5?.buys || 0;
+  const sells = pair.txns?.m5?.sells || 1;
+  const txns = buys + sells;
+  const ratio = buys / sells;
+  const ageMin = ageMinutes(pair);
+
+  const whale = whaleScore(pair);
+  const rug = rugProbability(pair);
+  const devRisk = devWalletRisk(pair);
+
+  return (
+    liq >= CONFIG.minLiquidity &&
+    vol >= CONFIG.minVolume5m &&
+    chg >= CONFIG.minPriceChange &&
+    ratio >= CONFIG.minBuysRatio &&
+    txns >= CONFIG.minTxns5m &&
+    ageMin >= CONFIG.minAgeMinutes &&
+    ageMin <= CONFIG.maxAgeHours * 60 &&
+    whale >= 55 &&
+    rug <= 35 &&
+    !devRisk
+  );
+}
+
+// ===== DISCOVER DEX SOLANA =====
+async function fetchDexSolanaPairs() {
+  const url = "https://api.dexscreener.com/latest/dex/search/?q=solana";
+  const { data } = await axios.get(url, { timeout: 10000 });
+
+  return (data.pairs || [])
+    .filter((p) => p.chainId === "solana")
+    .slice(0, 250);
+}
+
+// ===== BUY =====
+async function executeBuy(pair) {
+  const walletUsd = 100; // TODO later: live wallet balance from Jupiter/Helius
+  const spend = Math.min(
+    CONFIG.maxBuyUsd,
+    Math.max(0, walletUsd - CONFIG.feeReserveUsd)
   );
 
-  console.log(`Loaded ${pairs.length} full USDT spot pairs`);
-  await sendTelegram(`🧠 Loaded ${pairs.length} full USDT spot pairs`);
+  if (spend < CONFIG.buyUsdMin) return;
+
+  positions.set(pair.pairAddress, {
+    symbol: pair.baseToken.symbol,
+    entry: Number(pair.priceUsd),
+    peak: Number(pair.priceUsd),
+    amount: spend,
+  });
+
+  send(
+    `🚀 SAFE BUY ${pair.baseToken.symbol}\n💵 ${spend.toFixed(
+      2
+    )}$\n🐋 whale ok\n🛡️ anti scam ok`
+  );
 }
 
-async function getSignal(symbol) {
-  const candles = await exchange.fetchOHLCV(symbol, "1m", undefined, 20);
-  if (!candles || candles.length < 10) return false;
+// ===== SELL =====
+async function monitorPositions(pairs) {
+  for (const pair of pairs) {
+    const pos = positions.get(pair.pairAddress);
+    if (!pos) continue;
 
-  const closes = candles.map((c) => c[4]);
-  const highs = candles.map((c) => c[2]);
-  const volumes = candles.map((c) => c[5]);
+    const price = Number(pair.priceUsd);
+    const pnl = ((price - pos.entry) / pos.entry) * 100;
 
-  const last = closes.at(-1);
-  const prev = closes.at(-2);
+    if (price > pos.peak) pos.peak = price;
+    const drawdown = ((price - pos.peak) / pos.peak) * 100;
 
-  const high = Math.max(...highs.slice(-5, -1));
-  const breakoutPct = ((last - high) / high) * 100;
+    const emergencyExit =
+      (pair.liquidity?.usd || 0) < CONFIG.minLiquidity * 0.5;
 
-  const avgVol = volumes.slice(-6, -1).reduce((a, b) => a + b, 0) / 5;
-  const volBoost = volumes.at(-1) / avgVol;
+    if (
+      pnl >= CONFIG.takeProfit ||
+      pnl <= CONFIG.stopLoss ||
+      (pnl >= CONFIG.trailFrom &&
+        drawdown <= -CONFIG.trailDrop) ||
+      emergencyExit
+    ) {
+      positions.delete(pair.pairAddress);
 
-  return last > prev && breakoutPct >= 0.15 && volBoost >= 1.05;
-}
-
-async function findBestSignal() {
-  for (const symbol of pairs) {
-    try {
-      const ok = await getSignal(symbol);
-      if (ok) return symbol;
-    } catch (_) {}
-  }
-  return null;
-}
-
-async function buyFull(symbol) {
-  const balance = await exchange.fetchBalance();
-  const freeUsdt = Number(balance.free.USDT || 0);
-  const usdtToUse = Math.max(0, (freeUsdt - USDT_RESERVE) * FULL_BUY_PCT);
-
-  if (usdtToUse < 5) {
-    await sendTelegram(`⚠️ USDT too low: ${freeUsdt}`);
-    return;
-  }
-
-  const ticker = await exchange.fetchTicker(symbol);
-  const price = ticker.last;
-
-  let amount = usdtToUse / price;
-  amount = Number(exchange.amountToPrecision(symbol, amount));
-  if (!amount || amount <= 0) return;
-
-  await exchange.createMarketBuyOrder(symbol, amount);
-
-  position = {
-    symbol,
-    entry: price,
-    amount,
-  };
-  peakPnl = 0;
-
-  const msg = `🚀 REAL BUY ${symbol} @ ${price}`;
-  console.log(msg);
-  await sendTelegram(msg);
-}
-
-async function sellAll(reason) {
-  if (!position) return;
-
-  const base = position.symbol.split("/")[0];
-  const balance = await exchange.fetchBalance();
-
-  let amount = Number(balance.free[base] || 0);
-  amount = Number(exchange.amountToPrecision(position.symbol, amount));
-  if (!amount || amount <= 0) return;
-
-  await exchange.createMarketSellOrder(position.symbol, amount);
-
-  const msg = `💰 SELL ${position.symbol} | ${reason}`;
-  console.log(msg);
-  await sendTelegram(msg);
-
-  position = null;
-  peakPnl = 0;
-}
-
-async function managePosition() {
-  if (!position) return;
-
-  const ticker = await exchange.fetchTicker(position.symbol);
-  const pnl = ((ticker.last - position.entry) / position.entry) * 100;
-
-  if (pnl > peakPnl) peakPnl = pnl;
-
-  if (pnl <= STOP_LOSS_PCT) {
-    await sellAll(`🛑 STOP LOSS ${pnl.toFixed(2)}%`);
-    return;
-  }
-
-  if (peakPnl > 0 && pnl <= peakPnl - TRAIL_DROP_FROM_PEAK) {
-    await sellAll(`🎯 PEAK TRAIL ${pnl.toFixed(2)}% | peak ${peakPnl.toFixed(2)}%`);
+      send(`💰 SAFE SELL ${pos.symbol}\n📈 ${pnl.toFixed(2)}%`);
+    }
   }
 }
 
-async function main() {
-  await loadPairs();
-  console.log("🤖 JABBAR FULL SPOT BOT STARTED");
-  await sendTelegram("🤖 JABBAR FULL SPOT BOT STARTED");
+// ===== MAIN LOOP =====
+async function scanLoop() {
+  try {
+    const pairs = await fetchDexSolanaPairs();
 
-  while (true) {
-    try {
-      if (!position) {
-        const symbol = await findBestSignal();
-        if (symbol) await buyFull(symbol);
-      } else {
-        await managePosition();
+    for (const pair of pairs) {
+      const id = pair.pairAddress;
+      if (seen.has(id)) continue;
+      seen.add(id);
+
+      if (antiScam(pair)) {
+        await executeBuy(pair);
       }
-    } catch (e) {
-      console.log("loop error", e.message);
-      await sendTelegram(`❌ ${e.message}`);
     }
 
-    await sleep(LOOP_MS);
+    await monitorPositions(pairs);
+  } catch (e) {
+    send(`❌ scanner error: ${e.message}`);
   }
 }
 
-main();
+send("👹🛡️🐋 MONSTER ULTRA STARTED");
+setInterval(scanLoop, CONFIG.scanMs);
+scanLoop();
