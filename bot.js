@@ -12,23 +12,35 @@ const {
 } = require("@solana/web3.js");
 
 // ===== ENV =====
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
 
-const OKX_API_KEY = process.env.OKX_API_KEY;
-const OKX_SECRET_KEY = process.env.OKX_SECRET_KEY;
-const OKX_API_PASSPHRASE = process.env.OKX_API_PASSPHRASE;
-const OKX_PROJECT_ID = process.env.OKX_PROJECT_ID;
+const OKX_API_KEY = process.env.OKX_API_KEY || "";
+const OKX_SECRET_KEY = process.env.OKX_SECRET_KEY || "";
+const OKX_API_PASSPHRASE = process.env.OKX_API_PASSPHRASE || "";
+const OKX_PROJECT_ID = process.env.OKX_PROJECT_ID || "";
 
-// ✅ fallback حتى ما يكرش
 const SOLANA_RPC_URL =
   process.env.SOLANA_RPC_URL ||
   "https://api.mainnet-beta.solana.com";
 
-const PRIVATE_KEY = process.env.SOLANA_PRIVATE_KEY;
+// 🔑 fix private key
+const PRIVATE_KEY = process.env.SOLANA_PRIVATE_KEY || "";
+
+if (!PRIVATE_KEY || typeof PRIVATE_KEY !== "string") {
+  throw new Error("❌ SOLANA_PRIVATE_KEY missing or invalid");
+}
+
+let wallet;
+try {
+  wallet = Keypair.fromSecretKey(bs58.decode(PRIVATE_KEY.trim()));
+} catch (e) {
+  throw new Error(
+    "❌ SOLANA_PRIVATE_KEY must be base58 string only"
+  );
+}
 
 const connection = new Connection(SOLANA_RPC_URL, "confirmed");
-const wallet = Keypair.fromSecretKey(bs58.decode(PRIVATE_KEY));
 
 // ===== KEEP ALIVE =====
 http.createServer((req, res) => {
@@ -47,6 +59,8 @@ const TRAIL_DROP = 1;
 let position = null;
 
 async function sendTelegram(text) {
+  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+
   try {
     await fetch(
       `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
@@ -68,7 +82,7 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// ===== DEX TAB FEED =====
+// ===== DEX TAB TOKENS =====
 async function fetchDexTokens() {
   const seed = Date.now() % 10;
 
@@ -105,7 +119,7 @@ function dynamicFilter(tokens) {
     .sort((a, b) => b.change5m - a.change5m);
 }
 
-// ===== OKX HEADER =====
+// ===== OKX HEADERS =====
 function buildHeaders(path, query = "") {
   const timestamp = new Date().toISOString();
   const signStr = `${timestamp}GET${path}${query}`;
@@ -125,7 +139,7 @@ function buildHeaders(path, query = "") {
 
 // ===== REAL BUY =====
 async function executeSwapBuy(token) {
-  const amountIn = 14 * 1e6; // reserve 1$ gas
+  const amountIn = 14 * 1e6;
 
   const params = new URLSearchParams({
     chainIndex: "501",
