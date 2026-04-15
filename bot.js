@@ -1,94 +1,70 @@
 const axios = require("axios");
-const bs58 = require("bs58");
 const { Connection, Keypair } = require("@solana/web3.js");
 
-// =========================
-// CONFIG
-// =========================
+// ================= CONFIG =================
 const RPC =
   process.env.SOLANA_RPC_URL ||
   "https://api.mainnet-beta.solana.com";
 
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-const PRIVATE_KEY_RAW = process.env.SOLANA_PRIVATE_KEY;
+const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TG_CHAT = process.env.TELEGRAM_CHAT_ID;
 
 const connection = new Connection(RPC, "confirmed");
 
-let wallet = null;
+// خلي wallet global
+let wallet;
 
-// =========================
-// TELEGRAM
-// =========================
+// ================= TELEGRAM =================
 async function sendTelegram(msg) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+  if (!TG_TOKEN || !TG_CHAT) return;
 
   try {
     await axios.post(
-      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`,
+      `https://api.telegram.org/bot${TG_TOKEN}/sendMessage`,
       {
-        chat_id: TELEGRAM_CHAT_ID,
+        chat_id: TG_CHAT,
         text: msg,
       }
     );
   } catch (e) {
-    console.log("telegram error:", e.message);
+    console.log("telegram:", e.message);
   }
 }
 
-// =========================
-// WALLET LOADER
-// =========================
+// ================= WALLET =================
 function loadWallet() {
   try {
-    if (!PRIVATE_KEY_RAW) {
-      throw new Error("ENV key empty");
+    const raw = process.env.SOLANA_PRIVATE_KEY;
+
+    if (!raw) {
+      throw new Error("SOLANA_PRIVATE_KEY missing");
     }
 
-    const raw = PRIVATE_KEY_RAW.trim();
-    let secret;
+    const arr = JSON.parse(raw.trim());
+    const secret = Uint8Array.from(arr);
 
-    // الحالة 1: JSON ARRAY
-    if (raw.startsWith("[")) {
-      const arr = JSON.parse(raw);
-
-      if (!Array.isArray(arr)) {
-        throw new Error("JSON key is not array");
-      }
-
-      secret = Uint8Array.from(arr);
-    } else {
-      // الحالة 2: Base58
-      secret = bs58.decode(raw);
-    }
-
-    console.log("secret length =", secret.length);
-
-    if (secret.length === 64) {
-      wallet = Keypair.fromSecretKey(secret);
-    } else if (secret.length === 32) {
-      wallet = Keypair.fromSeed(secret);
-    } else {
+    if (secret.length !== 64) {
       throw new Error(
-        `invalid secret length ${secret.length}`
+        `invalid key length ${secret.length}`
       );
     }
+
+    wallet = Keypair.fromSecretKey(secret);
 
     console.log(
       "✅ wallet loaded:",
       wallet.publicKey.toBase58()
     );
 
-    return wallet;
+    return true;
   } catch (e) {
-    console.log("❌ wallet load failed:", e.message);
-    return null;
+    console.log("❌ wallet error:", e.message);
+    wallet = null;
+    return false;
   }
 }
 
-// =========================
-// BUY MOCK
-// =========================
+// ================= BUY =================
 async function executeBuy(symbol) {
   if (!wallet) {
     await sendTelegram(
@@ -100,23 +76,33 @@ async function executeBuy(symbol) {
   await sendTelegram(`🚀 REAL BUY ${symbol}`);
 }
 
-// =========================
-// SCANNER
-// =========================
+// ================= SCANNER =================
 async function scanDex() {
   await sendTelegram("🧠 scanning DEX Solana...");
-  await executeBuy("SMART");
+
+  // test fake token
+  const token = {
+    symbol: "SMART",
+  };
+
+  await executeBuy(token.symbol);
 }
 
-// =========================
-// START
-// =========================
+// ================= START =================
 async function start() {
   await sendTelegram("🔥 SMART GOLD BOT STARTED");
 
-  loadWallet();
+  const loaded = loadWallet();
 
-  setInterval(scanDex, 20000);
+  if (!loaded) {
+    await sendTelegram(
+      "⚠️ wallet init failed at startup"
+    );
+  }
+
+  setInterval(async () => {
+    await scanDex();
+  }, 20000);
 }
 
 start();
