@@ -24,10 +24,12 @@ async function sendTelegram(text) {
 }
 
 // ===== KEEP ALIVE =====
-http.createServer((req, res) => {
-  res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("OKX DEX SOLANA FULL TAB BOT");
-}).listen(process.env.PORT || 3000);
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("DEX SOLANA FULL TAB BOT");
+  })
+  .listen(process.env.PORT || 3000);
 
 // ===== OKX SPOT =====
 const exchange = new ccxt.okx({
@@ -41,6 +43,10 @@ const exchange = new ccxt.okx({
 // ===== SETTINGS =====
 let SYMBOLS = [];
 let lastRefresh = 0;
+let position = null;
+let peakPnl = 0;
+let lastHeartbeat = 0;
+const cooldowns = {};
 
 const LOOP_MS = 5000;
 const HEARTBEAT_MS = 5 * 60 * 1000;
@@ -54,26 +60,23 @@ const TRAIL_TRIGGER_PCT = 1.2;
 const TRAIL_DROP_PCT = 0.7;
 const COOLDOWN_MS = 15 * 60 * 1000;
 
-let position = null;
-let peakPnl = 0;
-let lastHeartbeat = 0;
-const cooldowns = {};
-
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
 async function heartbeat() {
   const now = Date.now();
+
   if (now - lastHeartbeat >= HEARTBEAT_MS) {
     lastHeartbeat = now;
+
     await sendTelegram(
-      `💓 BOT WORKING | watching ${SYMBOLS.length} Solana DEX tokens`
+      `💓 BOT WORKING | watching ${SYMBOLS.length} Solana DEX spot pairs`
     );
   }
 }
 
-// ===== LOAD ALL DEX SOLANA TOKENS =====
+// ===== LOAD DEX SOLANA + MATCH SPOT =====
 async function refreshDexSolanaSymbols() {
   const now = Date.now();
 
@@ -94,11 +97,18 @@ async function refreshDexSolanaSymbols() {
     const json = await res.json();
     const list = json.data || [];
 
-    const markets = exchange.markets || {};
+    const allSpot = Object.keys(exchange.markets).filter(
+      (s) => s.endsWith("/USDT")
+    );
 
-    SYMBOLS = list
-      .map((t) => `${t.tokenSymbol}/USDT`)
-      .filter((s) => markets[s]); // فقط الأزواج الموجودة Spot
+    const dexBases = new Set(
+      list.map((t) => String(t.tokenSymbol).toUpperCase())
+    );
+
+    SYMBOLS = allSpot.filter((pair) => {
+      const base = pair.split("/")[0].toUpperCase();
+      return dexBases.has(base);
+    });
 
     await sendTelegram(
       `🧠 Loaded ${SYMBOLS.length} DEX Solana spot pairs`
@@ -170,12 +180,7 @@ async function buyFull(symbol) {
     freeUsdt - USDT_RESERVE
   );
 
-  if (usdtToUse < 5) {
-    await sendTelegram(
-      "❌ balance too low after leaving 1 USDT"
-    );
-    return;
-  }
+  if (usdtToUse < 5) return;
 
   const ticker = await exchange.fetchTicker(symbol);
   const price = ticker.last;
