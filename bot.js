@@ -26,13 +26,18 @@ http.createServer((req, res) => {
   res.end("JABBAR SPOT BOT LIVE");
 }).listen(process.env.PORT || 3000);
 
-// ===== OKX =====
+// ===== OKX =====const ccxt = require("ccxt");
+const fetch = global.fetch;
+
 const exchange = new ccxt.okx({
   apiKey: process.env.OKX_API_KEY,
-  secret: process.env.OKX_SECRET_KEY,
-  password: process.env.OKX_API_PASSPHRASE,
+  secret: process.env.OKX_SECRET,
+  password: process.env.OKX_PASSPHRASE,
   enableRateLimit: true,
-  options: { defaultType: "spot" },
+  options: {
+    defaultType: "spot",
+  },
+});
 });
 
 // ===== SETTINGS =====
