@@ -1,12 +1,11 @@
 {
-  "name": "dex-solana-real-bot",
+  "name": "okx-real-spot-bot",
   "version": "1.0.0",
   "main": "bot.js",
   "scripts": {
     "start": "node bot.js"
   },
   "dependencies": {
-    "@solana/web3.js": "^1.95.3",
-    "bs58": "^5.0.0"
+    "ccxt": "^4.4.80"
   }
 }
