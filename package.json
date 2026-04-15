@@ -1,6 +1,15 @@
-"dependencies": {
-  "axios": "^1.6.0",
-  "@solana/web3.js": "^1.87.0",
-  "bs58": "^5.0.0",
-  "node-telegram-bot-api": "^0.64.0"
+{
+  "name": "smartgold-bot",
+  "version": "1.0.0",
+  "description": "Solana Trading Bot",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "@solana/web3.js": "^1.87.0",
+    "bs58": "^5.0.0",
+    "node-telegram-bot-api": "^0.64.0"
+  }
 }
