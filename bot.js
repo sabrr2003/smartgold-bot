@@ -1,66 +1,10 @@
+const ccxt = require("ccxt");
 const http = require("http");
 const fetch = global.fetch;
-const bs58 = require("bs58");
-const crypto = require("crypto");
-const {
-  Connection,
-  Keypair,
-  PublicKey,
-  VersionedTransaction,
-  TransactionInstruction,
-  TransactionMessage,
-} = require("@solana/web3.js");
 
-// ===== ENV =====
+// ===== TELEGRAM =====
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
-
-const OKX_API_KEY = process.env.OKX_API_KEY || "";
-const OKX_SECRET_KEY = process.env.OKX_SECRET_KEY || "";
-const OKX_API_PASSPHRASE = process.env.OKX_API_PASSPHRASE || "";
-const OKX_PROJECT_ID = process.env.OKX_PROJECT_ID || "";
-
-const SOLANA_RPC_URL =
-  process.env.SOLANA_RPC_URL ||
-  "https://api.mainnet-beta.solana.com";
-
-const PRIVATE_KEY = process.env.SOLANA_PRIVATE_KEY || "";
-
-const connection = new Connection(SOLANA_RPC_URL, "confirmed");
-
-// ===== SAFE MODE =====
-let wallet = null;
-let REAL_TRADING = false;
-
-try {
-  if (PRIVATE_KEY.trim()) {
-    wallet = Keypair.fromSecretKey(
-      bs58.decode(PRIVATE_KEY.trim())
-    );
-    REAL_TRADING = true;
-    console.log("✅ REAL TRADING ENABLED");
-  } else {
-    console.log("⚠️ PAPER MODE ENABLED");
-  }
-} catch (e) {
-  console.log("⚠️ INVALID KEY -> PAPER MODE");
-}
-
-// ===== KEEP ALIVE =====
-http.createServer((req, res) => {
-  res.end("DEX BOT LIVE");
-}).listen(process.env.PORT || 3000);
-
-// ===== SETTINGS =====
-const LOOP_MS = 1000;
-const MIN_PUMP = 3;
-const MIN_LIQ = 500000;
-const MAX_PRICE = 1;
-const STOP_LOSS = -3;
-const TRAIL_DROP = 1;
-const GAS_RESERVE_USD = 1;
-
-let position = null;
 
 async function sendTelegram(text) {
   if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
@@ -82,196 +26,231 @@ async function sendTelegram(text) {
   }
 }
 
+// ===== KEEP ALIVE =====
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("OKX SPOT BOT LIVE");
+  })
+  .listen(process.env.PORT || 3000);
+
+// ===== OKX =====
+const exchange = new ccxt.okx({
+  apiKey: process.env.OKX_API_KEY,
+  secret: process.env.OKX_SECRET_KEY,
+  password: process.env.OKX_API_PASSPHRASE,
+  enableRateLimit: true,
+  options: { defaultType: "spot" },
+});
+
+// ===== SETTINGS =====
+const SYMBOLS = [
+  "DOGE/USDT",
+  "PEPE/USDT",
+  "BONK/USDT",
+  "WIF/USDT",
+  "SHIB/USDT",
+  "FLOKI/USDT",
+  "MEME/USDT",
+  "BRETT/USDT",
+];
+
+const LOOP_MS = 5000;
+const HEARTBEAT_MS = 5 * 60 * 1000;
+const USDT_RESERVE = 1; // leave $1
+const MIN_BREAKOUT_PCT = 0.8;
+const MIN_VOL_BOOST = 1.5;
+const STOP_LOSS_PCT = -3;
+const TRAIL_TRIGGER_PCT = 2;
+const TRAIL_DROP_PCT = 1;
+const COOLDOWN_MS = 15 * 60 * 1000;
+
+let position = null;
+let peakPnl = 0;
+let lastHeartbeat = 0;
+const cooldowns = {};
+
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// ===== DEX TAB TOKENS =====
-async function fetchDexTokens() {
-  const seed = Date.now() % 10;
-
-  return [
-    {
-      symbol: "PUMPCADE",
-      mint: "So11111111111111111111111111111111111111112",
-      price: 0.041 + seed * 0.0002,
-      change5m: 14,
-      liquidity: 4200000,
-    },
-    {
-      symbol: "SHDW",
-      mint: "SHDWyBxihJPHGQjb1111111111111111111111111",
-      price: 0.033 + seed * 0.0001,
-      change5m: 10,
-      liquidity: 5600000,
-    },
-    {
-      symbol: "CLOUD",
-      mint: "CLD11111111111111111111111111111111111111",
-      price: 0.021,
-      change5m: 4,
-      liquidity: 1800000,
-    },
-  ];
+async function heartbeat() {
+  const now = Date.now();
+  if (now - lastHeartbeat >= HEARTBEAT_MS) {
+    lastHeartbeat = now;
+    console.log("BOT WORKING");
+    await sendTelegram("💓 OKX SPOT BOT WORKING");
+  }
 }
 
-function dynamicFilter(tokens) {
-  return tokens
-    .filter((t) => t.price <= MAX_PRICE)
-    .filter((t) => t.change5m >= MIN_PUMP)
-    .filter((t) => t.liquidity >= MIN_LIQ)
-    .sort((a, b) => b.change5m - a.change5m);
+async function getSignal(symbol) {
+  const candles = await exchange.fetchOHLCV(
+    symbol,
+    "5m",
+    undefined,
+    30
+  );
+  if (!candles || candles.length < 20) return false;
+
+  const closes = candles.map((c) => c[4]);
+  const highs = candles.map((c) => c[2]);
+  const volumes = candles.map((c) => c[5]);
+
+  const last = closes[closes.length - 1];
+  const prev = closes[closes.length - 2];
+  const rangeHigh = Math.max(...highs.slice(-8, -1));
+
+  const breakoutPct =
+    ((last - rangeHigh) / rangeHigh) * 100;
+
+  const avgVol =
+    volumes.slice(-10, -1).reduce((a, b) => a + b, 0) / 9;
+
+  const volBoost =
+    volumes[volumes.length - 1] / avgVol;
+
+  return (
+    last > prev &&
+    breakoutPct >= MIN_BREAKOUT_PCT &&
+    volBoost >= MIN_VOL_BOOST
+  );
 }
 
-// ===== OKX HEADERS =====
-function buildHeaders(path, query = "") {
-  const timestamp = new Date().toISOString();
-  const signStr = `${timestamp}GET${path}${query}`;
-  const sign = crypto
-    .createHmac("sha256", OKX_SECRET_KEY)
-    .update(signStr)
-    .digest("base64");
+async function scanBestSymbol() {
+  const now = Date.now();
 
-  return {
-    "OK-ACCESS-KEY": OKX_API_KEY,
-    "OK-ACCESS-SIGN": sign,
-    "OK-ACCESS-TIMESTAMP": timestamp,
-    "OK-ACCESS-PASSPHRASE": OKX_API_PASSPHRASE,
-    "OK-ACCESS-PROJECT": OKX_PROJECT_ID,
-  };
+  for (const symbol of SYMBOLS) {
+    const cd = cooldowns[symbol] || 0;
+    if (now - cd < COOLDOWN_MS) continue;
+
+    try {
+      const signal = await getSignal(symbol);
+      if (signal) return symbol;
+    } catch (e) {
+      console.log("scan fail", symbol, e.message);
+    }
+  }
+
+  return null;
 }
 
-// ===== BUY =====
-async function executeSwapBuy(token) {
-  // ===== PAPER MODE =====
-  if (!REAL_TRADING) {
-    position = {
-      symbol: token.symbol,
-      mint: token.mint,
-      entry: token.price,
-      peak: token.price,
-    };
+async function buyFull(symbol) {
+  const balance = await exchange.fetchBalance();
+  const freeUsdt = Number(balance.free.USDT || 0);
 
-    sendTelegram(`📡 PAPER BUY ${token.symbol}`);
+  const usdtToUse = Math.max(
+    0,
+    freeUsdt - USDT_RESERVE
+  );
+
+  if (usdtToUse < 5) {
+    await sendTelegram(
+      "❌ USDT too low after leaving $1 reserve"
+    );
     return;
   }
 
-  // ===== REAL MODE =====
-  const amountIn = 14 * 1e6;
+  const ticker = await exchange.fetchTicker(symbol);
+  const price = ticker.last;
 
-  const params = new URLSearchParams({
-    chainIndex: "501",
-    amount: String(amountIn),
-    fromTokenAddress: "Es9vMFrzaCER1111111111111111111111111111",
-    toTokenAddress: token.mint,
-    slippagePercent: "0.5",
-    userWalletAddress: wallet.publicKey.toBase58(),
-  });
+  let amount = usdtToUse / price;
+  amount = Number(
+    exchange.amountToPrecision(symbol, amount)
+  );
 
-  const path = "/api/v6/dex/aggregator/swap-instruction";
-  const query = `?${params.toString()}`;
+  if (!amount || amount <= 0) return;
 
-  const res = await fetch(`https://web3.okx.com${path}${query}`, {
-    headers: buildHeaders(path, query),
-  });
-
-  const json = await res.json();
-  const data = json.data?.[0];
-
-  if (!data?.instructionLists?.length) {
-    sendTelegram("❌ no swap route");
-    return;
-  }
-
-  const latest = await connection.getLatestBlockhash();
-
-  const instructions = data.instructionLists.map((ix) => {
-    return new TransactionInstruction({
-      programId: new PublicKey(ix.programId),
-      keys: ix.accounts.map((a) => ({
-        pubkey: new PublicKey(a.pubkey),
-        isSigner: a.isSigner,
-        isWritable: a.isWritable,
-      })),
-      data: Buffer.from(ix.data, "base64"),
-    });
-  });
-
-  const msg = new TransactionMessage({
-    payerKey: wallet.publicKey,
-    recentBlockhash: latest.blockhash,
-    instructions,
-  }).compileToV0Message();
-
-  const tx = new VersionedTransaction(msg);
-  tx.sign([wallet]);
-
-  const sig = await connection.sendTransaction(tx);
+  await exchange.createMarketBuyOrder(symbol, amount);
 
   position = {
-    symbol: token.symbol,
-    mint: token.mint,
-    entry: token.price,
-    peak: token.price,
+    symbol,
+    entry: price,
   };
 
-  sendTelegram(`🚀 REAL BUY ${token.symbol}\n${sig}`);
+  peakPnl = 0;
+
+  await sendTelegram(
+    `🚀 REAL BUY ${symbol} @ ${price}\n💵 ${usdtToUse.toFixed(
+      2
+    )} USDT\n💸 Reserved 1 USDT`
+  );
 }
 
-// ===== SELL =====
-async function executeSwapSell(token, pnl) {
-  if (!REAL_TRADING) {
-    sendTelegram(
-      `💰 PAPER SELL ${token.symbol} PROFIT ${pnl.toFixed(2)}%`
-    );
+async function sellAll(reason) {
+  if (!position) return;
+
+  const symbol = position.symbol;
+  const base = symbol.split("/")[0];
+
+  const balance = await exchange.fetchBalance();
+  let amount = Number(balance.free[base] || 0);
+
+  amount = Number(
+    exchange.amountToPrecision(symbol, amount)
+  );
+
+  if (!amount || amount <= 0) {
     position = null;
     return;
   }
 
-  sendTelegram(
-    `💰 REAL SELL ${token.symbol} PROFIT ${pnl.toFixed(2)}%`
-  );
+  await exchange.createMarketSellOrder(symbol, amount);
+
+  cooldowns[symbol] = Date.now();
+
+  await sendTelegram(`💰 REAL SELL ${symbol}\n${reason}`);
+
   position = null;
+  peakPnl = 0;
 }
 
-async function managePosition(tokens) {
+async function managePosition() {
   if (!position) return;
 
-  const live = tokens.find((t) => t.symbol === position.symbol);
-  if (!live) return;
+  const ticker = await exchange.fetchTicker(
+    position.symbol
+  );
 
-  if (live.price > position.peak) {
-    position.peak = live.price;
+  const pnl =
+    ((ticker.last - position.entry) /
+      position.entry) *
+    100;
+
+  if (pnl > peakPnl) peakPnl = pnl;
+
+  if (pnl <= STOP_LOSS_PCT) {
+    await sellAll(`🛑 STOP LOSS ${pnl.toFixed(2)}%`);
+    return;
   }
 
-  const pnl = ((live.price - position.entry) / position.entry) * 100;
-  const drop = ((position.peak - live.price) / position.peak) * 100;
+  if (peakPnl >= TRAIL_TRIGGER_PCT) {
+    const drop = peakPnl - pnl;
 
-  if (pnl <= STOP_LOSS || drop >= TRAIL_DROP) {
-    await executeSwapSell(live, pnl);
+    if (drop >= TRAIL_DROP_PCT) {
+      await sellAll(
+        `🎯 TRAIL PROFIT ${pnl.toFixed(2)}%`
+      );
+    }
   }
 }
 
 async function main() {
-  sendTelegram(
-    REAL_TRADING
-      ? "😈 REAL DEX BOT STARTED"
-      : "📡 PAPER DEX BOT STARTED"
-  );
+  await exchange.loadMarkets();
+  await sendTelegram("🤖 OKX REAL SPOT BOT STARTED");
 
   while (true) {
     try {
-      const tokens = await fetchDexTokens();
-      const filtered = dynamicFilter(tokens);
+      await heartbeat();
 
-      if (!position && filtered.length) {
-        await executeSwapBuy(filtered[0]);
+      if (!position) {
+        const symbol = await scanBestSymbol();
+        if (symbol) await buyFull(symbol);
       } else {
-        await managePosition(tokens);
+        await managePosition();
       }
     } catch (e) {
-      console.log("main loop error", e.message);
-      sendTelegram(`❌ ERROR ${e.message}`);
+      console.log("LOOP ERROR", e.message);
+      await sendTelegram(`❌ ERROR ${e.message}`);
     }
 
     await sleep(LOOP_MS);
