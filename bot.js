@@ -1,7 +1,7 @@
 const axios = require("axios");
-const bs58 = require("bs58");
 const { Connection, Keypair } = require("@solana/web3.js");
 
+// ================= CONFIG =================
 const RPC =
   process.env.SOLANA_RPC_URL ||
   "https://api.mainnet-beta.solana.com";
@@ -26,7 +26,7 @@ async function sendTelegram(msg) {
       }
     );
   } catch (e) {
-    console.log("telegram:", e.message);
+    console.log("telegram error:", e.message);
   }
 }
 
@@ -34,39 +34,32 @@ async function sendTelegram(msg) {
 function loadWallet() {
   try {
     let raw =
-      process.env.SOLANA_PRIVATE_KEY ||
       process.env.PRIVATE_KEY ||
-      process.env.WALLET_KEY ||
+      process.env.SOLANA_PRIVATE_KEY ||
       "";
 
-    if (!raw || raw.length < 10) {
-      throw new Error("empty env key");
-    }
+    if (!raw) throw new Error("PRIVATE_KEY missing");
 
-    raw = String(raw).trim();
+    // تنظيف الصيغة
+    raw = String(raw)
+      .replace(/\[/g, "")
+      .replace(/\]/g, "")
+      .replace(/،/g, ",")
+      .replace(/\s+/g, "")
+      .trim();
 
-    let secret;
+    const arr = raw
+      .split(",")
+      .map((x) => Number(x))
+      .filter((x) => !isNaN(x));
 
-    // JSON ARRAY
-    if (raw.startsWith("[")) {
-      secret = Uint8Array.from(JSON.parse(raw));
-    }
-    // CSV FORMAT
-    else if (raw.includes(",")) {
-      secret = Uint8Array.from(
-        raw.split(",").map((x) => Number(x.trim()))
-      );
-    }
-    // BASE58
-    else {
-      secret = bs58.decode(raw);
-    }
-
-    if (secret.length !== 64) {
+    if (arr.length !== 64) {
       throw new Error(
-        `invalid secret length ${secret.length}`
+        `invalid key length: ${arr.length}`
       );
     }
+
+    const secret = Uint8Array.from(arr);
 
     wallet = Keypair.fromSecretKey(secret);
 
@@ -77,7 +70,7 @@ function loadWallet() {
 
     return true;
   } catch (e) {
-    console.log("wallet load error:", e.message);
+    console.log("wallet error:", e.message);
     wallet = null;
     return false;
   }
@@ -92,15 +85,51 @@ async function executeBuy(symbol) {
     return;
   }
 
-  await sendTelegram(
-    `🚀 REAL BUY ${symbol}\n👛 ${wallet.publicKey.toBase58()}`
-  );
+  try {
+    const balance = await connection.getBalance(
+      wallet.publicKey
+    );
+
+    const sol = balance / 1e9;
+
+    await sendTelegram(
+      `🚀 REAL BUY ${symbol}\n👛 ${wallet.publicKey.toBase58()}\n💰 ${sol} SOL`
+    );
+  } catch (e) {
+    await sendTelegram(
+      `❌ buy failed: ${e.message}`
+    );
+  }
 }
 
 // ================= SCAN =================
 async function scanDex() {
-  await sendTelegram("🧠 scanning DEX Solana...");
-  await executeBuy("SMART");
+  try {
+    await sendTelegram("🧠 scanning DEX Solana...");
+
+    // توكن تجريبي
+    const token = {
+      symbol: "SMART",
+      liquidity: 15000,
+      volume: 30000,
+      age: 2,
+    };
+
+    // فلتر قوي
+    if (
+      token.liquidity >= 10000 &&
+      token.volume >= 20000 &&
+      token.age <= 5
+    ) {
+      await executeBuy(token.symbol);
+    } else {
+      await sendTelegram("⚠️ token rejected");
+    }
+  } catch (e) {
+    await sendTelegram(
+      `❌ scan error: ${e.message}`
+    );
+  }
 }
 
 // ================= START =================
@@ -119,7 +148,7 @@ async function start() {
     );
 
     await sendTelegram(
-      `✅ wallet loaded\n👛 ${wallet.publicKey.toBase58()}\n💰 ${balance / 1e9} SOL`
+      `✅ wallet loaded successfully\n👛 ${wallet.publicKey.toBase58()}\n💰 ${balance / 1e9} SOL`
     );
   }
 
