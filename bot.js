@@ -26,56 +26,58 @@ async function sendTelegram(msg) {
       }
     );
   } catch (e) {
-    console.log("telegram error:", e.message);
+    console.log("telegram:", e.message);
   }
 }
 
 // ================= WALLET =================
 function loadWallet() {
   try {
-    let raw = process.env.SOLANA_PRIVATE_KEY;
+    let raw =
+      process.env.SOLANA_PRIVATE_KEY ||
+      process.env.PRIVATE_KEY ||
+      process.env.WALLET_KEY ||
+      "";
 
-    if (!raw) {
-      throw new Error("SOLANA_PRIVATE_KEY missing");
+    if (!raw || raw.length < 10) {
+      throw new Error("empty env key");
     }
 
-    raw = raw.trim();
+    raw = String(raw).trim();
 
     let secret;
 
-    // JSON Array
+    // JSON ARRAY
     if (raw.startsWith("[")) {
-      const arr = JSON.parse(raw);
-      secret = Uint8Array.from(arr);
+      secret = Uint8Array.from(JSON.parse(raw));
     }
-    // CSV numbers
+    // CSV FORMAT
     else if (raw.includes(",")) {
-      const arr = raw
-        .split(",")
-        .map((x) => Number(x.trim()));
-      secret = Uint8Array.from(arr);
+      secret = Uint8Array.from(
+        raw.split(",").map((x) => Number(x.trim()))
+      );
     }
-    // base58
+    // BASE58
     else {
       secret = bs58.decode(raw);
     }
 
     if (secret.length !== 64) {
       throw new Error(
-        `secret length invalid ${secret.length}`
+        `invalid secret length ${secret.length}`
       );
     }
 
     wallet = Keypair.fromSecretKey(secret);
 
     console.log(
-      "✅ wallet loaded:",
+      "wallet loaded:",
       wallet.publicKey.toBase58()
     );
 
     return true;
   } catch (e) {
-    console.log("wallet error:", e.message);
+    console.log("wallet load error:", e.message);
     wallet = null;
     return false;
   }
@@ -98,12 +100,7 @@ async function executeBuy(symbol) {
 // ================= SCAN =================
 async function scanDex() {
   await sendTelegram("🧠 scanning DEX Solana...");
-
-  const token = {
-    symbol: "SMART",
-  };
-
-  await executeBuy(token.symbol);
+  await executeBuy("SMART");
 }
 
 // ================= START =================
@@ -115,6 +112,14 @@ async function start() {
   if (!ok) {
     await sendTelegram(
       "⚠️ wallet init failed at startup"
+    );
+  } else {
+    const balance = await connection.getBalance(
+      wallet.publicKey
+    );
+
+    await sendTelegram(
+      `✅ wallet loaded\n👛 ${wallet.publicKey.toBase58()}\n💰 ${balance / 1e9} SOL`
     );
   }
 
