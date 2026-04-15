@@ -15,10 +15,7 @@ async function sendTelegram(text) {
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: TELEGRAM_CHAT_ID,
-          text,
-        }),
+        body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text }),
       }
     );
   } catch (e) {
@@ -27,14 +24,12 @@ async function sendTelegram(text) {
 }
 
 // ===== KEEP ALIVE =====
-http
-  .createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("OKX SPOT BOT LIVE");
-  })
-  .listen(process.env.PORT || 3000);
+http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("OKX DEX SOLANA FULL TAB BOT");
+}).listen(process.env.PORT || 3000);
 
-// ===== OKX =====
+// ===== OKX SPOT =====
 const exchange = new ccxt.okx({
   apiKey: process.env.OKX_API_KEY,
   secret: process.env.OKX_SECRET_KEY,
@@ -44,25 +39,19 @@ const exchange = new ccxt.okx({
 });
 
 // ===== SETTINGS =====
-const SYMBOLS = [
-  "DOGE/USDT",
-  "PEPE/USDT",
-  "BONK/USDT",
-  "WIF/USDT",
-  "SHIB/USDT",
-  "FLOKI/USDT",
-  "MEME/USDT",
-  "BRETT/USDT",
-];
+let SYMBOLS = [];
+let lastRefresh = 0;
 
 const LOOP_MS = 5000;
 const HEARTBEAT_MS = 5 * 60 * 1000;
-const USDT_RESERVE = 1; // leave $1
-const MIN_BREAKOUT_PCT = 0.8;
-const MIN_VOL_BOOST = 1.5;
-const STOP_LOSS_PCT = -3;
-const TRAIL_TRIGGER_PCT = 2;
-const TRAIL_DROP_PCT = 1;
+const REFRESH_SYMBOLS_MS = 5 * 60 * 1000;
+
+const USDT_RESERVE = 1;
+const MIN_BREAKOUT_PCT = 0.3;
+const MIN_VOL_BOOST = 1.15;
+const STOP_LOSS_PCT = -2.5;
+const TRAIL_TRIGGER_PCT = 1.2;
+const TRAIL_DROP_PCT = 0.7;
 const COOLDOWN_MS = 15 * 60 * 1000;
 
 let position = null;
@@ -78,8 +67,45 @@ async function heartbeat() {
   const now = Date.now();
   if (now - lastHeartbeat >= HEARTBEAT_MS) {
     lastHeartbeat = now;
-    console.log("BOT WORKING");
-    await sendTelegram("💓 OKX SPOT BOT WORKING");
+    await sendTelegram(
+      `💓 BOT WORKING | watching ${SYMBOLS.length} Solana DEX tokens`
+    );
+  }
+}
+
+// ===== LOAD ALL DEX SOLANA TOKENS =====
+async function refreshDexSolanaSymbols() {
+  const now = Date.now();
+
+  if (
+    now - lastRefresh < REFRESH_SYMBOLS_MS &&
+    SYMBOLS.length
+  ) {
+    return;
+  }
+
+  lastRefresh = now;
+
+  try {
+    const res = await fetch(
+      "https://web3.okx.com/api/v6/dex/aggregator/all-tokens?chainIndex=501"
+    );
+
+    const json = await res.json();
+    const list = json.data || [];
+
+    const markets = exchange.markets || {};
+
+    SYMBOLS = list
+      .map((t) => `${t.tokenSymbol}/USDT`)
+      .filter((s) => markets[s]); // فقط الأزواج الموجودة Spot
+
+    await sendTelegram(
+      `🧠 Loaded ${SYMBOLS.length} DEX Solana spot pairs`
+    );
+  } catch (e) {
+    console.log("refresh token list fail", e.message);
+    await sendTelegram(`❌ TOKEN LOAD FAIL ${e.message}`);
   }
 }
 
@@ -90,6 +116,7 @@ async function getSignal(symbol) {
     undefined,
     30
   );
+
   if (!candles || candles.length < 20) return false;
 
   const closes = candles.map((c) => c[4]);
@@ -145,7 +172,7 @@ async function buyFull(symbol) {
 
   if (usdtToUse < 5) {
     await sendTelegram(
-      "❌ USDT too low after leaving $1 reserve"
+      "❌ balance too low after leaving 1 USDT"
     );
     return;
   }
@@ -170,9 +197,9 @@ async function buyFull(symbol) {
   peakPnl = 0;
 
   await sendTelegram(
-    `🚀 REAL BUY ${symbol} @ ${price}\n💵 ${usdtToUse.toFixed(
+    `🚀 REAL BUY ${symbol}\n💵 ${usdtToUse.toFixed(
       2
-    )} USDT\n💸 Reserved 1 USDT`
+    )} USDT\n💸 reserved 1 USDT`
   );
 }
 
@@ -236,11 +263,12 @@ async function managePosition() {
 
 async function main() {
   await exchange.loadMarkets();
-  await sendTelegram("🤖 OKX REAL SPOT BOT STARTED");
+  await sendTelegram("🤖 DEX SOLANA FULL TAB BOT STARTED");
 
   while (true) {
     try {
       await heartbeat();
+      await refreshDexSolanaSymbols();
 
       if (!position) {
         const symbol = await scanBestSymbol();
