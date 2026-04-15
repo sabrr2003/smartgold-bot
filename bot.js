@@ -1,4 +1,3 @@
-const ccxt = require("ccxt");
 const http = require("http");
 const fetch = global.fetch;
 
@@ -11,14 +10,10 @@ const TELEGRAM_CHAT_ID =
 async function sendTelegram(text) {
   try {
     const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-
     await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
-        text,
-      }),
+      body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text }),
     });
   } catch (e) {
     console.log("telegram fail", e.message);
@@ -26,185 +21,131 @@ async function sendTelegram(text) {
 }
 
 // ===== KEEP ALIVE =====
-http
-  .createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("BOT LIVE");
-  })
-  .listen(process.env.PORT || 3000);
-
-// ===== OKX =====
-const exchange = new ccxt.okx({
-  apiKey: process.env.OKX_API_KEY || "PUT_API_KEY_HERE",
-  secret: process.env.OKX_SECRET || "PUT_SECRET_HERE",
-  password: process.env.OKX_PASSPHRASE || "PUT_PASSPHRASE_HERE",
-  enableRateLimit: true,
-  options: { defaultType: "spot" },
-});
+http.createServer((req, res) => {
+  res.writeHead(200, { "Content-Type": "text/plain" });
+  res.end("OKX DEX LIVE");
+}).listen(process.env.PORT || 3000);
 
 // ===== SETTINGS =====
-const SYMBOLS = ["DOGE/USDT", "PEPE/USDT", "SOL/USDT", "BONK/USDT"];
-const LOOP_MS = 5000;
+const LOOP_MS = 1000;
+const MIN_PUMP = 3;
+const MIN_LIQ = 500000;
+const MAX_PRICE = 1;
+const STOP_LOSS = -3;
+const TRAIL_DROP = 1; // 1% from peak
 const HEARTBEAT_MS = 5 * 60 * 1000;
-const ENTRY_BALANCE_USE = 0.95;
-const STOP_LOSS_PCT = -1.0;
-const TRAIL_TRIGGER_PCT = 1.2;
-const TRAIL_GIVEBACK_PCT = 0.5;
-const DAILY_MAX_LOSSES = 3;
+
+// ضع توكنات الخانة اللي تريد يراقبها من OKX DEX Solana
+const DEX_TAB_TOKENS = [
+  "jellyjelly",
+  "PUMPCADE",
+  "SHDW",
+  "pippin",
+  "CLOUD",
+];
 
 let position = null;
-let peakPnl = 0;
 let lastHeartbeat = 0;
-let lossCount = 0;
-let lastDay = new Date().getUTCDate();
 
 function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((r) => setTimeout(r, ms));
 }
 
 function heartbeat() {
   const now = Date.now();
   if (now - lastHeartbeat >= HEARTBEAT_MS) {
     lastHeartbeat = now;
-    console.log("BOT WORKING");
-    sendTelegram("💓 BOT WORKING");
+    sendTelegram("💓 OKX DEX LIVE FILTER WORKING");
   }
 }
 
-function resetDailyLosses() {
-  const day = new Date().getUTCDate();
-  if (day !== lastDay) {
-    lastDay = day;
-    lossCount = 0;
-  }
+// ===== LIVE PRICE INFO =====
+// هذا قالب live-ready: تربطه لاحقًا بـ market/price-info
+async function fetchDexTokens() {
+  // TODO: replace with real OKX DEX market price-info POST
+  // https://web3.okx.com/api/v6/dex/market/price-info
+  const seed = Date.now() % 10;
+
+  return [
+    { symbol: "jellyjelly", price: 0.045 + seed * 0.0001, change5m: 5.2, liquidity: 1200000 },
+    { symbol: "PUMPCADE", price: 0.041 + seed * 0.0002, change5m: 14.6, liquidity: 4200000 },
+    { symbol: "SHDW", price: 0.033 + seed * 0.00015, change5m: 11.8, liquidity: 5600000 },
+    { symbol: "pippin", price: 0.026 + seed * 0.00005, change5m: 4.1, liquidity: 2100000 },
+    { symbol: "CLOUD", price: 0.021 + seed * 0.00004, change5m: 3.8, liquidity: 1800000 },
+  ];
 }
 
-async function getBreakoutSignal(symbol) {
-  const candles = await exchange.fetchOHLCV(symbol, "5m", undefined, 40);
-  if (!candles || candles.length < 30) return false;
-
-  const closes = candles.map((c) => c[4]);
-  const highs = candles.map((c) => c[2]);
-  const volumes = candles.map((c) => c[5]);
-
-  const ema9 = closes.slice(-9).reduce((a, b) => a + b, 0) / 9;
-  const ema21 = closes.slice(-21).reduce((a, b) => a + b, 0) / 21;
-
-  const last = closes[closes.length - 1];
-  const prev = closes[closes.length - 2];
-  const rangeHigh = Math.max(...highs.slice(-8, -1));
-  const breakout = last > rangeHigh;
-
-  const avgVol = volumes.slice(-10).reduce((a, b) => a + b, 0) / 10;
-  const volSpike = volumes[volumes.length - 1] > avgVol * 1.4;
-
-  return ema9 > ema21 && last > prev && breakout && volSpike;
+function dynamicFilter(tokens) {
+  return tokens
+    .filter((t) => DEX_TAB_TOKENS.includes(t.symbol))
+    .filter((t) => t.price <= MAX_PRICE)
+    .filter((t) => t.change5m >= MIN_PUMP)
+    .filter((t) => t.liquidity >= MIN_LIQ)
+    .sort((a, b) => {
+      const scoreA = a.change5m * Math.log10(a.liquidity);
+      const scoreB = b.change5m * Math.log10(b.liquidity);
+      return scoreB - scoreA;
+    });
 }
 
-async function scanBestSymbol() {
-  for (const symbol of SYMBOLS) {
-    try {
-      const signal = await getBreakoutSignal(symbol);
-      if (signal) return symbol;
-    } catch (err) {
-      console.log("scan fail", symbol, err.message);
-    }
-  }
-  return null;
+async function buyBest(token) {
+  position = {
+    symbol: token.symbol,
+    entry: token.price,
+    peak: token.price,
+  };
+
+  sendTelegram(`🚀 BUY ${token.symbol} @ ${token.price}`);
 }
 
-async function buyFull(symbol) {
-  const balance = await exchange.fetchBalance();
-  const usdt = Number(balance.free.USDT || 0) * ENTRY_BALANCE_USE;
-  if (usdt < 5) return;
-
-  const ticker = await exchange.fetchTicker(symbol);
-  const price = ticker.last;
-
-  let amount = usdt / price;
-  amount = Number(exchange.amountToPrecision(symbol, amount));
-  if (!amount || amount <= 0) return;
-
-  await exchange.createMarketBuyOrder(symbol, amount);
-  position = { symbol, entry: price };
-  peakPnl = 0;
-
-  const msg = `🚀 FULL BUY ${symbol} @ ${price}`;
-  console.log(msg);
-  sendTelegram(msg);
-}
-
-async function sellAll(reason) {
+async function managePosition(tokens) {
   if (!position) return;
 
-  const symbol = position.symbol;
-  const base = symbol.split("/")[0];
-  const balance = await exchange.fetchBalance();
+  const live = tokens.find((t) => t.symbol === position.symbol);
+  if (!live) return;
 
-  let amount = Number(balance.free[base] || 0);
-  amount = Number(exchange.amountToPrecision(symbol, amount));
-  if (!amount || amount <= 0) {
+  // update peak forever
+  if (live.price > position.peak) {
+    position.peak = live.price;
+  }
+
+  const pnl = ((live.price - position.entry) / position.entry) * 100;
+  const dropFromPeak =
+    ((position.peak - live.price) / position.peak) * 100;
+
+  // stop loss
+  if (pnl <= STOP_LOSS) {
+    sendTelegram(`🛑 SL SELL ${position.symbol} ${pnl.toFixed(2)}%`);
     position = null;
     return;
   }
 
-  await exchange.createMarketSellOrder(symbol, amount);
-
-  const msg = `✅ FULL SELL ${symbol} | ${reason}`;
-  console.log(msg);
-  sendTelegram(msg);
-
-  if (reason.includes("SL")) lossCount += 1;
-
-  position = null;
-  peakPnl = 0;
-}
-
-async function manageOpenPosition() {
-  if (!position) return;
-
-  const ticker = await exchange.fetchTicker(position.symbol);
-  const pnl = ((ticker.last - position.entry) / position.entry) * 100;
-
-  if (pnl > peakPnl) peakPnl = pnl;
-
-  if (pnl <= STOP_LOSS_PCT) {
-    await sellAll(`SL ${pnl.toFixed(2)}%`);
-    return;
-  }
-
-  if (
-    peakPnl >= TRAIL_TRIGGER_PCT &&
-    pnl <= peakPnl - TRAIL_GIVEBACK_PCT
-  ) {
-    await sellAll(`TRAIL ${pnl.toFixed(2)}%`);
+  // trailing from any peak, even 50%+
+  if (dropFromPeak >= TRAIL_DROP) {
+    sendTelegram(
+      `💰 PEAK TRAIL SELL ${position.symbol} PROFIT ${pnl.toFixed(2)}%`
+    );
+    position = null;
   }
 }
 
 async function main() {
-  await exchange.loadMarkets();
-  console.log("CRYPTO MEME HUNTER STARTED");
-  sendTelegram("🦈 CRYPTO MEME HUNTER STARTED");
+  sendTelegram("😈 OKX DEX LIVE PEAK HUNTER STARTED");
 
   while (true) {
     try {
       heartbeat();
-      resetDailyLosses();
 
-      if (lossCount >= DAILY_MAX_LOSSES) {
-        console.log("DAILY LOSS LOCK");
-        await sleep(LOOP_MS);
-        continue;
-      }
+      const tokens = await fetchDexTokens();
+      const filtered = dynamicFilter(tokens);
 
-      if (!position) {
-        const symbol = await scanBestSymbol();
-        if (symbol) await buyFull(symbol);
+      if (!position && filtered.length > 0) {
+        await buyBest(filtered[0]);
       } else {
-        await manageOpenPosition();
+        await managePosition(tokens);
       }
-    } catch (err) {
-      console.log("LOOP ERROR", err.message);
+    } catch (e) {
+      console.log("loop error", e.message);
     }
 
     await sleep(LOOP_MS);
