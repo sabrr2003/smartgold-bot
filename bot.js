@@ -3,13 +3,14 @@ const http = require("http");
 const fetch = global.fetch;
 
 // ===== TELEGRAM =====
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "";
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "";
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 
 async function sendTelegram(text) {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
   try {
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+    await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -17,18 +18,18 @@ async function sendTelegram(text) {
         text,
       }),
     });
-  } catch {}
+  } catch (e) {
+    console.log("telegram fail", e.message);
+  }
 }
 
 // ===== KEEP ALIVE =====
 http.createServer((req, res) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("JABBAR SPOT BOT LIVE");
+  res.end("BOT LIVE");
 }).listen(process.env.PORT || 3000);
 
-// ===== OKX =====const ccxt = require("ccxt");
-const fetch = global.fetch;
-
+// ===== OKX SPOT =====
 const exchange = new ccxt.okx({
   apiKey: process.env.OKX_API_KEY,
   secret: process.env.OKX_SECRET,
@@ -38,54 +39,42 @@ const exchange = new ccxt.okx({
     defaultType: "spot",
   },
 });
-});
 
 // ===== SETTINGS =====
-let SYMBOLS = [];
+const LOOP_MS = 4000;
+const USDT_RESERVE = 1; // leave 1$ for fees
+const FULL_BUY_PCT = 0.98;
+const STOP_LOSS_PCT = -2.0;
+const TRAIL_DROP_FROM_PEAK = 1.0;
+
+let pairs = [];
 let position = null;
 let peakPnl = 0;
-let lastRefresh = 0;
-const cooldowns = {};
-
-const LOOP_MS = 4000;
-const REFRESH_MS = 5 * 60 * 1000;
-const USDT_RESERVE = 1;
-const STOP_LOSS_PCT = -2.5;
-const TRAIL_TRIGGER_PCT = 1.0;
-const TRAIL_DROP_PCT = 0.7;
-const COOLDOWN_MS = 10 * 60 * 1000;
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-// ===== LOAD ALL USDT SPOT =====
-async function refreshSymbols() {
-  const now = Date.now();
-  if (now - lastRefresh < REFRESH_MS && SYMBOLS.length) return;
-  lastRefresh = now;
+async function loadPairs() {
+  const markets = await exchange.loadMarkets();
+  pairs = Object.keys(markets).filter(
+    (s) =>
+      s.endsWith("/USDT") &&
+      markets[s].spot &&
+      markets[s].active
+  );
 
-  const markets = Object.values(exchange.markets);
-
-  SYMBOLS = markets
-    .filter((m) =>
-      m.quote === "USDT" &&
-      m.spot &&
-      m.active
-    )
-    .map((m) => m.symbol);
-
-  await sendTelegram(`🧠 Loaded ${SYMBOLS.length} full USDT spot pairs`);
+  console.log(`Loaded ${pairs.length} full USDT spot pairs`);
+  await sendTelegram(`🧠 Loaded ${pairs.length} full USDT spot pairs`);
 }
 
-// ===== FAST 1m SIGNAL =====
 async function getSignal(symbol) {
   const candles = await exchange.fetchOHLCV(symbol, "1m", undefined, 20);
   if (!candles || candles.length < 10) return false;
 
-  const closes = candles.map(c => c[4]);
-  const highs = candles.map(c => c[2]);
-  const volumes = candles.map(c => c[5]);
+  const closes = candles.map((c) => c[4]);
+  const highs = candles.map((c) => c[2]);
+  const volumes = candles.map((c) => c[5]);
 
   const last = closes.at(-1);
   const prev = closes.at(-2);
@@ -93,80 +82,73 @@ async function getSignal(symbol) {
   const high = Math.max(...highs.slice(-5, -1));
   const breakoutPct = ((last - high) / high) * 100;
 
-  const avgVol = volumes.slice(-6, -1).reduce((a,b)=>a+b,0) / 5;
+  const avgVol = volumes.slice(-6, -1).reduce((a, b) => a + b, 0) / 5;
   const volBoost = volumes.at(-1) / avgVol;
 
   return last > prev && breakoutPct >= 0.15 && volBoost >= 1.05;
 }
 
-// ===== FIND BEST =====
-async function scanBest() {
-  const now = Date.now();
-
-  for (const symbol of SYMBOLS) {
-    if (now - (cooldowns[symbol] || 0) < COOLDOWN_MS) continue;
-
+async function findBestSignal() {
+  for (const symbol of pairs) {
     try {
-      const signal = await getSignal(symbol);
-      if (signal) return symbol;
-    } catch {}
+      const ok = await getSignal(symbol);
+      if (ok) return symbol;
+    } catch (_) {}
   }
-
   return null;
 }
 
-// ===== BUY =====
 async function buyFull(symbol) {
-  const bal = await exchange.fetchBalance();
-  const freeUsdt = Number(bal.free.USDT || 0);
-  const use = Math.max(0, freeUsdt - USDT_RESERVE);
+  const balance = await exchange.fetchBalance();
+  const freeUsdt = Number(balance.free.USDT || 0);
+  const usdtToUse = Math.max(0, (freeUsdt - USDT_RESERVE) * FULL_BUY_PCT);
 
-  if (use < 5) return;
+  if (usdtToUse < 5) {
+    await sendTelegram(`⚠️ USDT too low: ${freeUsdt}`);
+    return;
+  }
 
   const ticker = await exchange.fetchTicker(symbol);
-  let amount = use / ticker.last;
-  amount = Number(exchange.amountToPrecision(symbol, amount));
+  const price = ticker.last;
 
+  let amount = usdtToUse / price;
+  amount = Number(exchange.amountToPrecision(symbol, amount));
   if (!amount || amount <= 0) return;
 
   await exchange.createMarketBuyOrder(symbol, amount);
 
   position = {
     symbol,
-    entry: ticker.last,
+    entry: price,
+    amount,
   };
-
   peakPnl = 0;
 
-  await sendTelegram(
-    `🚀 REAL BUY ${symbol}\n💵 ${use.toFixed(2)} USDT\n📍 ${ticker.last}`
-  );
+  const msg = `🚀 REAL BUY ${symbol} @ ${price}`;
+  console.log(msg);
+  await sendTelegram(msg);
 }
 
-// ===== SELL =====
 async function sellAll(reason) {
   if (!position) return;
 
-  const symbol = position.symbol;
-  const base = symbol.split("/")[0];
+  const base = position.symbol.split("/")[0];
+  const balance = await exchange.fetchBalance();
 
-  const bal = await exchange.fetchBalance();
-  let amount = Number(bal.free[base] || 0);
-  amount = Number(exchange.amountToPrecision(symbol, amount));
+  let amount = Number(balance.free[base] || 0);
+  amount = Number(exchange.amountToPrecision(position.symbol, amount));
+  if (!amount || amount <= 0) return;
 
-  if (amount > 0) {
-    await exchange.createMarketSellOrder(symbol, amount);
-  }
+  await exchange.createMarketSellOrder(position.symbol, amount);
 
-  cooldowns[symbol] = Date.now();
-
-  await sendTelegram(`💰 REAL SELL ${symbol}\n${reason}`);
+  const msg = `💰 SELL ${position.symbol} | ${reason}`;
+  console.log(msg);
+  await sendTelegram(msg);
 
   position = null;
   peakPnl = 0;
 }
 
-// ===== POSITION MANAGEMENT =====
 async function managePosition() {
   if (!position) return;
 
@@ -180,32 +162,26 @@ async function managePosition() {
     return;
   }
 
-  if (
-    peakPnl >= TRAIL_TRIGGER_PCT &&
-    peakPnl - pnl >= TRAIL_DROP_PCT
-  ) {
-    await sellAll(`🎯 TRAIL SELL ${pnl.toFixed(2)}%`);
+  if (peakPnl > 0 && pnl <= peakPnl - TRAIL_DROP_FROM_PEAK) {
+    await sellAll(`🎯 PEAK TRAIL ${pnl.toFixed(2)}% | peak ${peakPnl.toFixed(2)}%`);
   }
 }
 
-// ===== MAIN =====
 async function main() {
-  await exchange.loadMarkets();
+  await loadPairs();
+  console.log("🤖 JABBAR FULL SPOT BOT STARTED");
   await sendTelegram("🤖 JABBAR FULL SPOT BOT STARTED");
 
   while (true) {
     try {
-      await refreshSymbols();
-
       if (!position) {
-        const symbol = await scanBest();
-        if (symbol) {
-          await buyFull(symbol);
-        }
+        const symbol = await findBestSignal();
+        if (symbol) await buyFull(symbol);
       } else {
         await managePosition();
       }
     } catch (e) {
+      console.log("loop error", e.message);
       await sendTelegram(`❌ ${e.message}`);
     }
 
