@@ -1,33 +1,49 @@
-// ===============================
-// CRYPTO MEME HUNTER BOT
-// COPY-READY CLEAN VERSION
-// Railway + OKX + KeepAlive
-// ===============================
+const ccxt = require("ccxt");
+const http = require("http");
+const fetch = global.fetch;
 
-const ccxt = require('ccxt');
-const http = require('http');
+// ===== TELEGRAM =====
+const TELEGRAM_BOT_TOKEN =
+  process.env.TELEGRAM_BOT_TOKEN || "PUT_TELEGRAM_BOT_TOKEN";
+const TELEGRAM_CHAT_ID =
+  process.env.TELEGRAM_CHAT_ID || "PUT_CHAT_ID";
 
-// ===== Railway Keep Alive =====
-http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('BOT LIVE');
-}).listen(process.env.PORT || 3000);
+async function sendTelegram(text) {
+  try {
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
 
-// ===== API KEYS =====
-const OKX_API_KEY = process.env.OKX_API_KEY || 'PUT_API_KEY_HERE';
-const OKX_SECRET = process.env.OKX_SECRET || 'PUT_SECRET_HERE';
-const OKX_PASSPHRASE = process.env.OKX_PASSPHRASE || 'PUT_PASSPHRASE_HERE';
+    await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text,
+      }),
+    });
+  } catch (e) {
+    console.log("telegram fail", e.message);
+  }
+}
 
+// ===== KEEP ALIVE =====
+http
+  .createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("BOT LIVE");
+  })
+  .listen(process.env.PORT || 3000);
+
+// ===== OKX =====
 const exchange = new ccxt.okx({
-  apiKey: OKX_API_KEY,
-  secret: OKX_SECRET,
-  password: OKX_PASSPHRASE,
+  apiKey: process.env.OKX_API_KEY || "PUT_API_KEY_HERE",
+  secret: process.env.OKX_SECRET || "PUT_SECRET_HERE",
+  password: process.env.OKX_PASSPHRASE || "PUT_PASSPHRASE_HERE",
   enableRateLimit: true,
-  options: { defaultType: 'spot' }
+  options: { defaultType: "spot" },
 });
 
 // ===== SETTINGS =====
-const SYMBOLS = ['DOGE/USDT', 'PEPE/USDT', 'SOL/USDT', 'BONK/USDT'];
+const SYMBOLS = ["DOGE/USDT", "PEPE/USDT", "SOL/USDT", "BONK/USDT"];
 const LOOP_MS = 5000;
 const HEARTBEAT_MS = 5 * 60 * 1000;
 const ENTRY_BALANCE_USE = 0.95;
@@ -43,14 +59,15 @@ let lossCount = 0;
 let lastDay = new Date().getUTCDate();
 
 function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function heartbeat() {
   const now = Date.now();
   if (now - lastHeartbeat >= HEARTBEAT_MS) {
     lastHeartbeat = now;
-    console.log('💓 BOT WORKING', new Date().toISOString());
+    console.log("BOT WORKING");
+    sendTelegram("💓 BOT WORKING");
   }
 }
 
@@ -63,12 +80,12 @@ function resetDailyLosses() {
 }
 
 async function getBreakoutSignal(symbol) {
-  const candles = await exchange.fetchOHLCV(symbol, '5m', undefined, 40);
+  const candles = await exchange.fetchOHLCV(symbol, "5m", undefined, 40);
   if (!candles || candles.length < 30) return false;
 
-  const closes = candles.map(c => c[4]);
-  const highs = candles.map(c => c[2]);
-  const volumes = candles.map(c => c[5]);
+  const closes = candles.map((c) => c[4]);
+  const highs = candles.map((c) => c[2]);
+  const volumes = candles.map((c) => c[5]);
 
   const ema9 = closes.slice(-9).reduce((a, b) => a + b, 0) / 9;
   const ema21 = closes.slice(-21).reduce((a, b) => a + b, 0) / 21;
@@ -90,7 +107,7 @@ async function scanBestSymbol() {
       const signal = await getBreakoutSignal(symbol);
       if (signal) return symbol;
     } catch (err) {
-      console.log('⚠️ scan fail', symbol, err.message);
+      console.log("scan fail", symbol, err.message);
     }
   }
   return null;
@@ -99,47 +116,45 @@ async function scanBestSymbol() {
 async function buyFull(symbol) {
   const balance = await exchange.fetchBalance();
   const usdt = Number(balance.free.USDT || 0) * ENTRY_BALANCE_USE;
-
-  if (usdt < 5) {
-    console.log('⚠️ no enough USDT');
-    return;
-  }
+  if (usdt < 5) return;
 
   const ticker = await exchange.fetchTicker(symbol);
   const price = ticker.last;
 
   let amount = usdt / price;
   amount = Number(exchange.amountToPrecision(symbol, amount));
-
   if (!amount || amount <= 0) return;
 
   await exchange.createMarketBuyOrder(symbol, amount);
-
   position = { symbol, entry: price };
   peakPnl = 0;
 
-  console.log(`🚀 FULL BUY ${symbol} @ ${price}`);
+  const msg = `🚀 FULL BUY ${symbol} @ ${price}`;
+  console.log(msg);
+  sendTelegram(msg);
 }
 
 async function sellAll(reason) {
   if (!position) return;
 
   const symbol = position.symbol;
-  const base = symbol.split('/')[0];
+  const base = symbol.split("/")[0];
   const balance = await exchange.fetchBalance();
 
   let amount = Number(balance.free[base] || 0);
   amount = Number(exchange.amountToPrecision(symbol, amount));
-
   if (!amount || amount <= 0) {
     position = null;
     return;
   }
 
   await exchange.createMarketSellOrder(symbol, amount);
-  console.log(`✅ FULL SELL ${symbol} | ${reason}`);
 
-  if (reason.includes('SL')) lossCount += 1;
+  const msg = `✅ FULL SELL ${symbol} | ${reason}`;
+  console.log(msg);
+  sendTelegram(msg);
+
+  if (reason.includes("SL")) lossCount += 1;
 
   position = null;
   peakPnl = 0;
@@ -158,14 +173,18 @@ async function manageOpenPosition() {
     return;
   }
 
-  if (peakPnl >= TRAIL_TRIGGER_PCT && pnl <= peakPnl - TRAIL_GIVEBACK_PCT) {
+  if (
+    peakPnl >= TRAIL_TRIGGER_PCT &&
+    pnl <= peakPnl - TRAIL_GIVEBACK_PCT
+  ) {
     await sellAll(`TRAIL ${pnl.toFixed(2)}%`);
   }
 }
 
 async function main() {
   await exchange.loadMarkets();
-  console.log('🦈 CRYPTO MEME HUNTER STARTED');
+  console.log("CRYPTO MEME HUNTER STARTED");
+  sendTelegram("🦈 CRYPTO MEME HUNTER STARTED");
 
   while (true) {
     try {
@@ -173,7 +192,7 @@ async function main() {
       resetDailyLosses();
 
       if (lossCount >= DAILY_MAX_LOSSES) {
-        console.log('🛑 DAILY LOSS LOCK');
+        console.log("DAILY LOSS LOCK");
         await sleep(LOOP_MS);
         continue;
       }
@@ -185,7 +204,7 @@ async function main() {
         await manageOpenPosition();
       }
     } catch (err) {
-      console.log('❌ LOOP ERROR', err.message);
+      console.log("LOOP ERROR", err.message);
     }
 
     await sleep(LOOP_MS);
