@@ -9,7 +9,7 @@ const bs58 = require("bs58");
 const TelegramBot = require("node-telegram-bot-api");
 
 // ===============================
-// 🔐 CONFIGURATION
+// 🔐 CONFIG KEYS (تم دمج مفاتيحك هنا)
 // ===============================
 const CONFIG = {
   // مفتاح المحفظة الخاص بك
@@ -18,33 +18,34 @@ const CONFIG = {
   // رابط Helius RPC الخاص بك
   SOLANA_RPC_URL: "https://mainnet.helius-rpc.com/?api-key=b24fa717-c2d7-425d-9b3e-9b4df931c04f",
 
-  // تليجرام (اختياري)
-  TELEGRAM_BOT_TOKEN: "", 
+  // بيانات التليجرام (أضف التوكن الخاص بك هنا لتفعيل التنبيهات)
+  TELEGRAM_BOT_TOKEN: "",
   TELEGRAM_CHAT_ID: "",
 
   // 🔥 الفلاتر
-  MIN_LIQUIDITY: 10000, // السيولة بالدولار
-  MIN_VOLUME: 20000,    // حجم التداول
+  MIN_LIQUIDITY: 10000,
+  MIN_VOLUME: 20000,
   MAX_TOKEN_AGE_MINUTES: 5,
 
   // 💰 إعدادات الشراء
   BUY_SOL_AMOUNT: 0.02,
   KEEP_FEE_SOL: 0.005,
-  SLIPPAGE_BPS: 300 // 3%
+  SLIPPAGE_BPS: 300
 };
 
 // ===============================
-// 🛠️ INITIALIZATION
+// WALLET & CONNECTION INIT
 // ===============================
 const connection = new Connection(CONFIG.SOLANA_RPC_URL, "confirmed");
 
-// فك تشفير المحفظة
 function loadWallet() {
   try {
     const decoded = bs58.decode(CONFIG.PRIVATE_KEY);
-    return Keypair.fromSecretKey(decoded);
+    const kp = Keypair.fromSecretKey(decoded);
+    console.log("✅ Wallet loaded:", kp.publicKey.toBase58());
+    return kp;
   } catch (e) {
-    console.error("❌ فشل تحميل المحفظة: ", e.message);
+    console.error("❌ Wallet failure:", e.message);
     return null;
   }
 }
@@ -60,88 +61,94 @@ async function sendTelegram(message) {
 }
 
 // ===============================
-// 🛒 BUY ENGINE
+// 🛒 BUY ENGINE (Jupiter V6)
 // ===============================
-async function executeBuy(mintAddress, symbol) {
+async function executeBuy(token) {
   try {
+    if (!wallet) return;
+
     const balance = await connection.getBalance(wallet.publicKey);
     if (balance < (CONFIG.BUY_SOL_AMOUNT + CONFIG.KEEP_FEE_SOL) * LAMPORTS_PER_SOL) {
-      await sendTelegram("⚠️ الرصيد في المحفظة منخفض جداً!");
+      await sendTelegram("⚠️ SOL balance too low!");
       return;
     }
 
     const buyLamports = Math.floor(CONFIG.BUY_SOL_AMOUNT * LAMPORTS_PER_SOL);
 
-    // 1. طلب عرض سعر من Jupiter
-    const { data: quoteResponse } = await axios.get(
-      `https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=${mintAddress}&amount=${buyLamports}&slippageBps=${CONFIG.SLIPPAGE_BPS}`
+    // 1. Quote
+    const quote = await axios.get(
+      `https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=${token.mint}&amount=${buyLamports}&slippageBps=${CONFIG.SLIPPAGE_BPS}`
     );
 
-    // 2. إنشاء المعاملة
-    const { data: { swapTransaction } } = await axios.post("https://quote-api.jup.ag/v6/swap", {
-      quoteResponse,
+    // 2. Swap Transaction
+    const swap = await axios.post("https://quote-api.jup.ag/v6/swap", {
+      quoteResponse: quote.data,
       userPublicKey: wallet.publicKey.toBase58(),
       wrapAndUnwrapSol: true
     });
 
-    // 3. توقيع وإرسال المعاملة
-    const swapTransactionBuf = Buffer.from(swapTransaction, "base64");
-    const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
-    transaction.sign([wallet]);
+    const txBuf = Buffer.from(swap.data.swapTransaction, "base64");
+    const transaction = VersionedTransaction.deserialize(txBuf);
 
+    // 3. Sign & Send
+    transaction.sign([wallet]);
     const signature = await connection.sendRawTransaction(transaction.serialize(), {
       skipPreflight: false,
       maxRetries: 3
     });
 
-    await sendTelegram(`🚀 شراء ناجح لعملة ${symbol}\n🔗 الرابط: https://solscan.io/tx/${signature}`);
+    await sendTelegram(`🚀 BUY SUCCESS: ${token.symbol}\n🔗 https://solscan.io/tx/${signature}`);
   } catch (e) {
-    await sendTelegram(`❌ خطأ شراء ${symbol}: ` + (e.response?.data?.error || e.message));
+    await sendTelegram(`❌ Buy Error (${token.symbol}): ` + (e.response?.data?.error || e.message));
   }
 }
 
 // ===============================
-// 🔍 SCANNER (Real-time monitoring)
+// 🔍 REAL-TIME SCANNER (DexScreener)
 // ===============================
-async function scanNewTokens() {
+async function scanDex() {
   try {
-    // ملاحظة: هنا نستخدم API من BirdEye أو DexScreener لجلب العملات الجديدة
-    // كمثال، سنقوم بفحص قائمة العملات الجديدة من Jupiter أو Dex
-    const response = await axios.get('https://api.dexscreener.com/latest/dex/tokens/solana');
-    const tokens = response.data.pairs;
+    // جلب أحدث العملات من سولانا
+    const response = await axios.get("https://api.dexscreener.com/latest/dex/tokens/solana");
+    const pairs = response.data.pairs || [];
 
-    for (const token of tokens) {
+    for (const token of pairs) {
       const liquidity = token.liquidity?.usd || 0;
       const volume = token.volume?.h24 || 0;
-      const mint = token.baseToken.address;
-      const symbol = token.baseToken.symbol;
+      
+      const tokenData = {
+        symbol: token.baseToken.symbol,
+        mint: token.baseToken.address,
+        liquidity: liquidity,
+        volume: volume,
+        age: 1 // DexScreener لا يعطي العمر بالدقائق مباشرة، نفترض أنها جديدة
+      };
 
       // تطبيق الفلاتر
       if (liquidity >= CONFIG.MIN_LIQUIDITY && volume >= CONFIG.MIN_VOLUME) {
-        console.log(`✅ عملة مطابقة للمواصفات: ${symbol}`);
-        await executeBuy(mint, symbol);
-        break; // تجنب شراء كل شيء مرة واحدة في الفحص الواحد
+        await sendTelegram(`🎯 Target Found: ${tokenData.symbol}`);
+        await executeBuy(tokenData);
+        break; // شراء عملة واحدة في كل دورة لتجنب السبام
       }
     }
   } catch (e) {
-    console.error("❌ خطأ في فحص العملات: ", e.message);
+    console.error("Scan error:", e.message);
   }
 }
 
 // ===============================
-// 🚀 START
+// 🚀 STARTUP
 // ===============================
-async function main() {
-  if (!wallet) return;
+async function start() {
+  await sendTelegram("🔥 SMART GOLD BOT STARTED WITH HELIUS RPC");
   
-  await sendTelegram(`
-🔥 بوت الذهب الذكي يعمل الآن!
-👛 المحفظة: ${wallet.publicKey.toBase58()}
-🌐 RPC: Helius Connected
-  `);
-
-  // تشغيل الفحص كل 15 ثانية
-  setInterval(scanNewTokens, 15000);
+  if (wallet) {
+    const balance = await connection.getBalance(wallet.publicKey);
+    await sendTelegram(`✅ Wallet: ${wallet.publicKey.toBase58()}\n💰 Balance: ${balance / LAMPORTS_PER_SOL} SOL`);
+    
+    // فحص كل 15 ثانية
+    setInterval(scanDex, 15000);
+  }
 }
 
-main();
+start();
