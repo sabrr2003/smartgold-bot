@@ -1,3 +1,4 @@
+// CRYPTO MEME HUNTER BOT - Railway + OKX
 const ccxt = require('ccxt');
 
 const exchange = new ccxt.okx({
@@ -8,157 +9,124 @@ const exchange = new ccxt.okx({
   options: { defaultType: 'spot' }
 });
 
-const SYMBOL = 'XAUT/USDT';
-const LOOP_MS = 3000;
-const HEARTBEAT_MS = 5 * 60 * 1000;
-const PROFIT_TRIGGER = 0.6;
-const TRAILING_DROP = 0.25;
-const STOP_LOSS = -0.35;
+const SYMBOLS = ['DOGE/USDT', 'PEPE/USDT', 'SOL/USDT', 'BONK/USDT'];
+const LOOP_MS = 5000;
+const RISK_FRACTION = 0.95;
+const PROFIT_TRIGGER = 1.2;
+const TRAILING_DROP = 0.5;
+const STOP_LOSS = -0.8;
+const DAILY_MAX_LOSSES = 3;
 
-let inPosition = false;
-let entryPrice = 0;
+let position = null;
 let peakPnl = 0;
-let lastHeartbeat = 0;
+let lossCount = 0;
+let lastDay = new Date().getDate();
 
-async function sendTelegram(text) {
-  try {
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    const chatId = process.env.TELEGRAM_CHAT_ID;
-    if (!token || !chatId) return;
-
-    const url = 'https://api.telegram.org/bot' + token + '/sendMessage';
-
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text: text
-      })
-    });
-
-    await response.text();
-  } catch (err) {
-    console.log('telegram error:', err.message);
+function resetDaily() {
+  const day = new Date().getDate();
+  if (day !== lastDay) {
+    lastDay = day;
+    lossCount = 0;
   }
 }
 
-async function heartbeat() {
-  const now = Date.now();
-  if (now - lastHeartbeat >= HEARTBEAT_MS) {
-    lastHeartbeat = now;
-    await sendTelegram('💓 BOT WORKING');
-  }
-}
-
-async function getSignal() {
-  const candles = await exchange.fetchOHLCV(SYMBOL, '1m', undefined, 30);
-
+async function getSignal(symbol) {
+  const candles = await exchange.fetchOHLCV(symbol, '5m', undefined, 40);
   const closes = candles.map(c => c[4]);
   const highs = candles.map(c => c[2]);
   const vols = candles.map(c => c[5]);
 
-  const ma5 = closes.slice(-5).reduce((a, b) => a + b, 0) / 5;
-  const ma20 = closes.slice(-20).reduce((a, b) => a + b, 0) / 20;
-
+  const ema9 = closes.slice(-9).reduce((a,b)=>a+b,0)/9;
+  const ema21 = closes.slice(-21).reduce((a,b)=>a+b,0)/21;
   const last = closes[closes.length - 1];
   const prev = closes[closes.length - 2];
+  const breakout = last > Math.max(...highs.slice(-8, -1));
+  const avgVol = vols.slice(-10).reduce((a,b)=>a+b,0)/10;
+  const volSpike = vols[vols.length - 1] > avgVol * 1.4;
 
-  const avgVol = vols.slice(-10).reduce((a, b) => a + b, 0) / 10;
-  const lastVol = vols[vols.length - 1];
-
-  const trend = ma5 > ma20;
-  const momentum = last > prev;
-  const volume = lastVol > avgVol * 1.2;
-  const breakout = last > Math.max.apply(null, highs.slice(-6, -1));
-
-  return trend && momentum && volume && breakout;
+  return ema9 > ema21 && last > prev && breakout && volSpike;
 }
 
-async function buyAll() {
+async function scanBestCoin() {
+  for (const symbol of SYMBOLS) {
+    try {
+      const ok = await getSignal(symbol);
+      if (ok) return symbol;
+    } catch (e) {
+      console.log('scan fail', symbol, e.message);
+    }
+  }
+  return null;
+}
+
+async function buy(symbol) {
   const balance = await exchange.fetchBalance();
-  const usdt = Number(balance.free.USDT || 0);
+  const usdt = Number(balance.free.USDT || 0) * RISK_FRACTION;
+  if (usdt < 5) return;
 
-  if (usdt <= 1) return;
-
-  const ticker = await exchange.fetchTicker(SYMBOL);
+  const ticker = await exchange.fetchTicker(symbol);
   let amount = usdt / ticker.last;
-
-  amount = Number(exchange.amountToPrecision(SYMBOL, amount));
+  amount = Number(exchange.amountToPrecision(symbol, amount));
   if (amount <= 0) return;
 
-  await exchange.createMarketBuyOrder(SYMBOL, amount);
-
-  inPosition = true;
-  entryPrice = ticker.last;
+  await exchange.createMarketBuyOrder(symbol, amount);
+  position = { symbol, entry: ticker.last };
   peakPnl = 0;
-
-  await sendTelegram('🚀 FULL BUY @ ' + entryPrice);
+  console.log('🚀 BUY', symbol, ticker.last);
 }
 
-async function sellAll(reason) {
+async function sell(reason) {
+  if (!position) return;
+  const symbol = position.symbol;
+  const base = symbol.split('/')[0];
   const balance = await exchange.fetchBalance();
-  const base = SYMBOL.split('/')[0];
-
   let amount = Number(balance.free[base] || 0);
+  amount = Number(exchange.amountToPrecision(symbol, amount));
   if (amount <= 0) return;
 
-  amount = Number(exchange.amountToPrecision(SYMBOL, amount));
-  if (amount <= 0) return;
-
-  await exchange.createMarketSellOrder(SYMBOL, amount);
-
-  inPosition = false;
-  entryPrice = 0;
+  await exchange.createMarketSellOrder(symbol, amount);
+  console.log('✅ SELL', symbol, reason);
+  if (reason.includes('SL')) lossCount += 1;
+  position = null;
   peakPnl = 0;
-
-  await sendTelegram('✅ FULL SELL | ' + reason);
 }
 
-async function manageTrade() {
-  if (!inPosition) return;
-
-  const ticker = await exchange.fetchTicker(SYMBOL);
-  const pnl = ((ticker.last - entryPrice) / entryPrice) * 100;
+async function managePosition() {
+  const ticker = await exchange.fetchTicker(position.symbol);
+  const pnl = ((ticker.last - position.entry) / position.entry) * 100;
 
   if (pnl > peakPnl) peakPnl = pnl;
 
   if (pnl <= STOP_LOSS) {
-    await sellAll('STOP LOSS ' + pnl.toFixed(2) + '%');
+    await sell('SL ' + pnl.toFixed(2) + '%');
     return;
   }
 
-  if (peakPnl >= PROFIT_TRIGGER) {
-    const trailLevel = peakPnl - TRAILING_DROP;
-    if (pnl <= trailLevel) {
-      await sellAll('TRAILING ' + pnl.toFixed(2) + '%');
-    }
+  if (peakPnl >= PROFIT_TRIGGER && pnl <= peakPnl - TRAILING_DROP) {
+    await sell('TRAIL ' + pnl.toFixed(2) + '%');
   }
 }
 
 async function main() {
   await exchange.loadMarkets();
-  await sendTelegram('🥇 BOT STARTED');
+  console.log('🦈 CRYPTO MEME HUNTER STARTED');
 
   while (true) {
     try {
-      await heartbeat();
-
-      if (!inPosition) {
-        const signal = await getSignal();
-        if (signal) {
-          await buyAll();
-        }
+      resetDaily();
+      if (lossCount >= DAILY_MAX_LOSSES) {
+        console.log('🛑 daily lock');
+      } else if (!position) {
+        const symbol = await scanBestCoin();
+        if (symbol) await buy(symbol);
       } else {
-        await manageTrade();
+        await managePosition();
       }
     } catch (e) {
-      console.log('LOOP ERROR:', e.message);
+      console.log('loop error', e.message);
     }
 
-    await new Promise(resolve => setTimeout(resolve, LOOP_MS));
+    await new Promise(r => setTimeout(r, LOOP_MS));
   }
 }
 
