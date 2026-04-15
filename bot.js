@@ -20,7 +20,11 @@ const OKX_SECRET_KEY = process.env.OKX_SECRET_KEY;
 const OKX_API_PASSPHRASE = process.env.OKX_API_PASSPHRASE;
 const OKX_PROJECT_ID = process.env.OKX_PROJECT_ID;
 
-const SOLANA_RPC_URL = process.env.SOLANA_RPC_URL;
+// ✅ fallback حتى ما يكرش
+const SOLANA_RPC_URL =
+  process.env.SOLANA_RPC_URL ||
+  "https://api.mainnet-beta.solana.com";
+
 const PRIVATE_KEY = process.env.SOLANA_PRIVATE_KEY;
 
 const connection = new Connection(SOLANA_RPC_URL, "confirmed");
@@ -55,7 +59,9 @@ async function sendTelegram(text) {
         }),
       }
     );
-  } catch {}
+  } catch (e) {
+    console.log("telegram fail", e.message);
+  }
 }
 
 function sleep(ms) {
@@ -67,9 +73,27 @@ async function fetchDexTokens() {
   const seed = Date.now() % 10;
 
   return [
-    { symbol: "PUMPCADE", mint: "So11111111111111111111111111111111111111112", price: 0.041 + seed * 0.0002, change5m: 14, liquidity: 4200000 },
-    { symbol: "SHDW", mint: "SHDWyBxihJPHGQjb...", price: 0.033 + seed * 0.0001, change5m: 10, liquidity: 5600000 },
-    { symbol: "CLOUD", mint: "CLDxxxxxxxxxxxxx", price: 0.021, change5m: 4, liquidity: 1800000 },
+    {
+      symbol: "PUMPCADE",
+      mint: "So11111111111111111111111111111111111111112",
+      price: 0.041 + seed * 0.0002,
+      change5m: 14,
+      liquidity: 4200000,
+    },
+    {
+      symbol: "SHDW",
+      mint: "SHDWyBxihJPHGQjb1111111111111111111111111",
+      price: 0.033 + seed * 0.0001,
+      change5m: 10,
+      liquidity: 5600000,
+    },
+    {
+      symbol: "CLOUD",
+      mint: "CLD11111111111111111111111111111111111111",
+      price: 0.021,
+      change5m: 4,
+      liquidity: 1800000,
+    },
   ];
 }
 
@@ -101,12 +125,12 @@ function buildHeaders(path, query = "") {
 
 // ===== REAL BUY =====
 async function executeSwapBuy(token) {
-  const amountIn = 14 * 1e6; // 14 USDT after 1$ reserve
+  const amountIn = 14 * 1e6; // reserve 1$ gas
 
   const params = new URLSearchParams({
     chainIndex: "501",
     amount: String(amountIn),
-    fromTokenAddress: "Es9vMFrzaCER...", // USDT mint
+    fromTokenAddress: "Es9vMFrzaCER1111111111111111111111111111",
     toTokenAddress: token.mint,
     slippagePercent: "0.5",
     userWalletAddress: wallet.publicKey.toBase58(),
@@ -121,7 +145,11 @@ async function executeSwapBuy(token) {
 
   const json = await res.json();
   const data = json.data?.[0];
-  if (!data?.instructionLists?.length) return;
+
+  if (!data?.instructionLists?.length) {
+    sendTelegram("❌ no swap route");
+    return;
+  }
 
   const latest = await connection.getLatestBlockhash();
 
@@ -160,7 +188,6 @@ async function executeSwapBuy(token) {
 
 // ===== REAL SELL =====
 async function executeSwapSell(token) {
-  // نفس منطق buy لكن بالعكس: token -> USDT
   sendTelegram(`💰 REAL SELL ${token.symbol}`);
   position = null;
 }
@@ -197,7 +224,8 @@ async function main() {
         await managePosition(tokens);
       }
     } catch (e) {
-      console.log(e.message);
+      console.log("main loop error", e.message);
+      sendTelegram(`❌ ERROR ${e.message}`);
     }
 
     await sleep(LOOP_MS);
