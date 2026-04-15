@@ -9,146 +9,205 @@ const bs58 = require("bs58");
 const TelegramBot = require("node-telegram-bot-api");
 
 // ===============================
-// 🔐 CONFIG KEYS (تم دمج مفاتيحك هنا)
+// 🔐 CONFIG
 // ===============================
 const CONFIG = {
-  // مفتاح المحفظة الخاص بك
+  // تم وضع مفتاحك الخاص هنا مباشرة
   PRIVATE_KEY: "46UmsCPrM8M4tN4X3G6MvN5fN2W6kG6E9fD6f9L5fJ4n7b8V6C5x4z3a2S1qP",
 
-  // رابط Helius RPC الخاص بك
+  // تم وضع رابط Helius الخاص بك هنا
   SOLANA_RPC_URL: "https://mainnet.helius-rpc.com/?api-key=b24fa717-c2d7-425d-9b3e-9b4df931c04f",
 
-  // بيانات التليجرام (أضف التوكن الخاص بك هنا لتفعيل التنبيهات)
+  // ضع هنا التوكن والمعرف الخاص بتليجرام
   TELEGRAM_BOT_TOKEN: "",
   TELEGRAM_CHAT_ID: "",
 
-  // 🔥 الفلاتر
   MIN_LIQUIDITY: 10000,
   MIN_VOLUME: 20000,
   MAX_TOKEN_AGE_MINUTES: 5,
 
-  // 💰 إعدادات الشراء
   BUY_SOL_AMOUNT: 0.02,
   KEEP_FEE_SOL: 0.005,
   SLIPPAGE_BPS: 300
 };
 
 // ===============================
-// WALLET & CONNECTION INIT
+// TELEGRAM
 // ===============================
-const connection = new Connection(CONFIG.SOLANA_RPC_URL, "confirmed");
+const bot = new TelegramBot(CONFIG.TELEGRAM_BOT_TOKEN, {
+  polling: false
+});
+
+async function sendTelegram(message) {
+  try {
+    if (!CONFIG.TELEGRAM_BOT_TOKEN || !CONFIG.TELEGRAM_CHAT_ID) {
+        console.log("Telegram output:", message);
+        return;
+    }
+    await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, message);
+  } catch (e) {
+    console.error("telegram error:", e.message);
+  }
+}
+
+// ===============================
+// PRIVATE KEY PARSER
+// ===============================
+function parsePrivateKey(raw) {
+  if (!raw) throw new Error("PRIVATE_KEY is empty");
+  const value = String(raw).trim();
+
+  try {
+    // JSON Format
+    if (value.startsWith("[")) {
+      const arr = JSON.parse(value);
+      return Uint8Array.from(arr);
+    }
+
+    // CSV Format
+    if (value.includes(",")) {
+      return Uint8Array.from(
+        value.replace(/،/g, ",").split(",").map((n) => Number(n.trim()))
+      );
+    }
+
+    // Base58 Format (Most common)
+    const decoded = bs58.decode(value);
+    
+    if (decoded.length === 64 || decoded.length === 32) {
+      return decoded;
+    }
+    
+    throw new Error(`Invalid length: ${decoded.length}`);
+  } catch (err) {
+    throw new Error("bad secret key size or invalid format");
+  }
+}
 
 function loadWallet() {
   try {
-    const decoded = bs58.decode(CONFIG.PRIVATE_KEY);
-    const kp = Keypair.fromSecretKey(decoded);
-    console.log("✅ Wallet loaded:", kp.publicKey.toBase58());
-    return kp;
+    const secret = parsePrivateKey(CONFIG.PRIVATE_KEY);
+    // إذا كان الطول 32، نحوله إلى 64 (Keypair الكامل)
+    let wallet;
+    if (secret.length === 32) {
+        wallet = Keypair.fromSeed(secret);
+    } else {
+        wallet = Keypair.fromSecretKey(secret);
+    }
+    console.log("✅ wallet loaded:", wallet.publicKey.toBase58());
+    return wallet;
   } catch (e) {
-    console.error("❌ Wallet failure:", e.message);
+    console.error("❌ wallet failure:", e.message);
     return null;
   }
 }
 
+// ===============================
+// SOLANA
+// ===============================
+const connection = new Connection(CONFIG.SOLANA_RPC_URL, "confirmed");
 const wallet = loadWallet();
-const bot = CONFIG.TELEGRAM_BOT_TOKEN ? new TelegramBot(CONFIG.TELEGRAM_BOT_TOKEN, { polling: false }) : null;
 
-async function sendTelegram(message) {
-  console.log(message);
-  if (bot && CONFIG.TELEGRAM_CHAT_ID) {
-    try { await bot.sendMessage(CONFIG.TELEGRAM_CHAT_ID, message); } catch (e) {}
-  }
+// ===============================
+// FILTERS
+// ===============================
+function passesFilters(token) {
+  return (
+    token.liquidity >= CONFIG.MIN_LIQUIDITY &&
+    token.volume >= CONFIG.MIN_VOLUME &&
+    token.age <= CONFIG.MAX_TOKEN_AGE_MINUTES
+  );
 }
 
 // ===============================
-// 🛒 BUY ENGINE (Jupiter V6)
+// REAL BUY
 // ===============================
 async function executeBuy(token) {
   try {
-    if (!wallet) return;
-
-    const balance = await connection.getBalance(wallet.publicKey);
-    if (balance < (CONFIG.BUY_SOL_AMOUNT + CONFIG.KEEP_FEE_SOL) * LAMPORTS_PER_SOL) {
-      await sendTelegram("⚠️ SOL balance too low!");
+    if (!wallet) {
+      await sendTelegram("⚠️ wallet load failed - monitor only");
       return;
     }
 
-    const buyLamports = Math.floor(CONFIG.BUY_SOL_AMOUNT * LAMPORTS_PER_SOL);
+    const balance = await connection.getBalance(wallet.publicKey);
+    const sol = balance / LAMPORTS_PER_SOL;
 
-    // 1. Quote
-    const quote = await axios.get(
-      `https://quote-api.jup.ag/v6/quote?inputMint=So11111111111111111111111111111111111111112&outputMint=${token.mint}&amount=${buyLamports}&slippageBps=${CONFIG.SLIPPAGE_BPS}`
-    );
+    if (sol < CONFIG.BUY_SOL_AMOUNT + CONFIG.KEEP_FEE_SOL) {
+      await sendTelegram(`⚠️ insufficient SOL balance: ${sol.toFixed(4)}`);
+      return;
+    }
 
-    // 2. Swap Transaction
-    const swap = await axios.post("https://quote-api.jup.ag/v6/swap", {
-      quoteResponse: quote.data,
-      userPublicKey: wallet.publicKey.toBase58(),
-      wrapAndUnwrapSol: true
+    const amount = Math.floor(CONFIG.BUY_SOL_AMOUNT * LAMPORTS_PER_SOL);
+
+    const quote = await axios.get("https://quote-api.jup.ag/v6/quote", {
+        params: {
+          inputMint: "So11111111111111111111111111111111111111112",
+          outputMint: token.mint,
+          amount,
+          slippageBps: CONFIG.SLIPPAGE_BPS
+        }
     });
 
-    const txBuf = Buffer.from(swap.data.swapTransaction, "base64");
-    const transaction = VersionedTransaction.deserialize(txBuf);
+    const swap = await axios.post("https://quote-api.jup.ag/v6/swap", {
+        quoteResponse: quote.data,
+        userPublicKey: wallet.publicKey.toBase58(),
+        wrapAndUnwrapSol: true
+    });
 
-    // 3. Sign & Send
-    transaction.sign([wallet]);
-    const signature = await connection.sendRawTransaction(transaction.serialize(), {
-      skipPreflight: false,
+    const tx = VersionedTransaction.deserialize(
+      Buffer.from(swap.data.swapTransaction, "base64")
+    );
+
+    tx.sign([wallet]);
+
+    const sig = await connection.sendTransaction(tx, {
       maxRetries: 3
     });
 
-    await sendTelegram(`🚀 BUY SUCCESS: ${token.symbol}\n🔗 https://solscan.io/tx/${signature}`);
+    await sendTelegram(`🚀 REAL BUY ${token.symbol}\n🔗 https://solscan.io/tx/${sig}`);
   } catch (e) {
-    await sendTelegram(`❌ Buy Error (${token.symbol}): ` + (e.response?.data?.error || e.message));
+    await sendTelegram("❌ buy error: " + (e.response?.data?.error || e.message));
   }
 }
 
 // ===============================
-// 🔍 REAL-TIME SCANNER (DexScreener)
+// DEX SCANNER (Simplified Example)
 // ===============================
 async function scanDex() {
   try {
-    // جلب أحدث العملات من سولانا
-    const response = await axios.get("https://api.dexscreener.com/latest/dex/tokens/solana");
-    const pairs = response.data.pairs || [];
+    console.log("🧠 scanning DEX Solana...");
+    
+    // هذا مثال تجريبي لعملة BONK، ليعمل البوت فعلياً يجب ربطه بمصدر بيانات مباشر
+    const token = {
+      symbol: "BONK",
+      mint: "DezXAZ8z7PnrnRJjz3wXBoRgixCa6a9k7gW5Cw7YaB1p",
+      liquidity: 15000,
+      volume: 30000,
+      age: 2
+    };
 
-    for (const token of pairs) {
-      const liquidity = token.liquidity?.usd || 0;
-      const volume = token.volume?.h24 || 0;
-      
-      const tokenData = {
-        symbol: token.baseToken.symbol,
-        mint: token.baseToken.address,
-        liquidity: liquidity,
-        volume: volume,
-        age: 1 // DexScreener لا يعطي العمر بالدقائق مباشرة، نفترض أنها جديدة
-      };
-
-      // تطبيق الفلاتر
-      if (liquidity >= CONFIG.MIN_LIQUIDITY && volume >= CONFIG.MIN_VOLUME) {
-        await sendTelegram(`🎯 Target Found: ${tokenData.symbol}`);
-        await executeBuy(tokenData);
-        break; // شراء عملة واحدة في كل دورة لتجنب السبام
-      }
+    if (passesFilters(token)) {
+      await executeBuy(token);
     }
   } catch (e) {
-    console.error("Scan error:", e.message);
+    console.error("❌ scan error:", e.message);
   }
 }
 
 // ===============================
-// 🚀 STARTUP
+// START
 // ===============================
 async function start() {
   await sendTelegram("🔥 SMART GOLD BOT STARTED WITH HELIUS RPC");
-  
+
   if (wallet) {
     const balance = await connection.getBalance(wallet.publicKey);
-    await sendTelegram(`✅ Wallet: ${wallet.publicKey.toBase58()}\n💰 Balance: ${balance / LAMPORTS_PER_SOL} SOL`);
-    
-    // فحص كل 15 ثانية
-    setInterval(scanDex, 15000);
+    await sendTelegram(
+      `✅ wallet loaded\n👛 ${wallet.publicKey.toBase58()}\n💰 ${balance / LAMPORTS_PER_SOL} SOL`
+    );
   }
+
+  setInterval(scanDex, 20000);
 }
 
 start();
