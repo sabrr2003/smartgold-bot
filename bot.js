@@ -1,7 +1,7 @@
 const axios = require("axios");
+const bs58 = require("bs58");
 const { Connection, Keypair } = require("@solana/web3.js");
 
-// ================= CONFIG =================
 const RPC =
   process.env.SOLANA_RPC_URL ||
   "https://api.mainnet-beta.solana.com";
@@ -11,8 +11,7 @@ const TG_CHAT = process.env.TELEGRAM_CHAT_ID;
 
 const connection = new Connection(RPC, "confirmed");
 
-// خلي wallet global
-let wallet;
+let wallet = null;
 
 // ================= TELEGRAM =================
 async function sendTelegram(msg) {
@@ -27,25 +26,43 @@ async function sendTelegram(msg) {
       }
     );
   } catch (e) {
-    console.log("telegram:", e.message);
+    console.log("telegram error:", e.message);
   }
 }
 
 // ================= WALLET =================
 function loadWallet() {
   try {
-    const raw = process.env.SOLANA_PRIVATE_KEY;
+    let raw = process.env.SOLANA_PRIVATE_KEY;
 
     if (!raw) {
       throw new Error("SOLANA_PRIVATE_KEY missing");
     }
 
-    const arr = JSON.parse(raw.trim());
-    const secret = Uint8Array.from(arr);
+    raw = raw.trim();
+
+    let secret;
+
+    // JSON Array
+    if (raw.startsWith("[")) {
+      const arr = JSON.parse(raw);
+      secret = Uint8Array.from(arr);
+    }
+    // CSV numbers
+    else if (raw.includes(",")) {
+      const arr = raw
+        .split(",")
+        .map((x) => Number(x.trim()));
+      secret = Uint8Array.from(arr);
+    }
+    // base58
+    else {
+      secret = bs58.decode(raw);
+    }
 
     if (secret.length !== 64) {
       throw new Error(
-        `invalid key length ${secret.length}`
+        `secret length invalid ${secret.length}`
       );
     }
 
@@ -58,7 +75,7 @@ function loadWallet() {
 
     return true;
   } catch (e) {
-    console.log("❌ wallet error:", e.message);
+    console.log("wallet error:", e.message);
     wallet = null;
     return false;
   }
@@ -73,14 +90,15 @@ async function executeBuy(symbol) {
     return;
   }
 
-  await sendTelegram(`🚀 REAL BUY ${symbol}`);
+  await sendTelegram(
+    `🚀 REAL BUY ${symbol}\n👛 ${wallet.publicKey.toBase58()}`
+  );
 }
 
-// ================= SCANNER =================
+// ================= SCAN =================
 async function scanDex() {
   await sendTelegram("🧠 scanning DEX Solana...");
 
-  // test fake token
   const token = {
     symbol: "SMART",
   };
@@ -92,17 +110,15 @@ async function scanDex() {
 async function start() {
   await sendTelegram("🔥 SMART GOLD BOT STARTED");
 
-  const loaded = loadWallet();
+  const ok = loadWallet();
 
-  if (!loaded) {
+  if (!ok) {
     await sendTelegram(
       "⚠️ wallet init failed at startup"
     );
   }
 
-  setInterval(async () => {
-    await scanDex();
-  }, 20000);
+  setInterval(scanDex, 20000);
 }
 
 start();
