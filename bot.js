@@ -24,37 +24,41 @@ const SOLANA_RPC_URL =
   process.env.SOLANA_RPC_URL ||
   "https://api.mainnet-beta.solana.com";
 
-// 🔑 fix private key
 const PRIVATE_KEY = process.env.SOLANA_PRIVATE_KEY || "";
-
-if (!PRIVATE_KEY || typeof PRIVATE_KEY !== "string") {
-  throw new Error("❌ SOLANA_PRIVATE_KEY missing or invalid");
-}
-
-let wallet;
-try {
-  wallet = Keypair.fromSecretKey(bs58.decode(PRIVATE_KEY.trim()));
-} catch (e) {
-  throw new Error(
-    "❌ SOLANA_PRIVATE_KEY must be base58 string only"
-  );
-}
 
 const connection = new Connection(SOLANA_RPC_URL, "confirmed");
 
+// ===== SAFE MODE =====
+let wallet = null;
+let REAL_TRADING = false;
+
+try {
+  if (PRIVATE_KEY.trim()) {
+    wallet = Keypair.fromSecretKey(
+      bs58.decode(PRIVATE_KEY.trim())
+    );
+    REAL_TRADING = true;
+    console.log("✅ REAL TRADING ENABLED");
+  } else {
+    console.log("⚠️ PAPER MODE ENABLED");
+  }
+} catch (e) {
+  console.log("⚠️ INVALID KEY -> PAPER MODE");
+}
+
 // ===== KEEP ALIVE =====
 http.createServer((req, res) => {
-  res.end("REAL DEX SWAP LIVE");
+  res.end("DEX BOT LIVE");
 }).listen(process.env.PORT || 3000);
 
 // ===== SETTINGS =====
 const LOOP_MS = 1000;
-const GAS_RESERVE_USD = 1;
 const MIN_PUMP = 3;
 const MIN_LIQ = 500000;
 const MAX_PRICE = 1;
 const STOP_LOSS = -3;
 const TRAIL_DROP = 1;
+const GAS_RESERVE_USD = 1;
 
 let position = null;
 
@@ -137,8 +141,22 @@ function buildHeaders(path, query = "") {
   };
 }
 
-// ===== REAL BUY =====
+// ===== BUY =====
 async function executeSwapBuy(token) {
+  // ===== PAPER MODE =====
+  if (!REAL_TRADING) {
+    position = {
+      symbol: token.symbol,
+      mint: token.mint,
+      entry: token.price,
+      peak: token.price,
+    };
+
+    sendTelegram(`📡 PAPER BUY ${token.symbol}`);
+    return;
+  }
+
+  // ===== REAL MODE =====
   const amountIn = 14 * 1e6;
 
   const params = new URLSearchParams({
@@ -200,9 +218,19 @@ async function executeSwapBuy(token) {
   sendTelegram(`🚀 REAL BUY ${token.symbol}\n${sig}`);
 }
 
-// ===== REAL SELL =====
-async function executeSwapSell(token) {
-  sendTelegram(`💰 REAL SELL ${token.symbol}`);
+// ===== SELL =====
+async function executeSwapSell(token, pnl) {
+  if (!REAL_TRADING) {
+    sendTelegram(
+      `💰 PAPER SELL ${token.symbol} PROFIT ${pnl.toFixed(2)}%`
+    );
+    position = null;
+    return;
+  }
+
+  sendTelegram(
+    `💰 REAL SELL ${token.symbol} PROFIT ${pnl.toFixed(2)}%`
+  );
   position = null;
 }
 
@@ -220,12 +248,16 @@ async function managePosition(tokens) {
   const drop = ((position.peak - live.price) / position.peak) * 100;
 
   if (pnl <= STOP_LOSS || drop >= TRAIL_DROP) {
-    await executeSwapSell(live);
+    await executeSwapSell(live, pnl);
   }
 }
 
 async function main() {
-  sendTelegram("😈 REAL DEX SWAP BOT STARTED");
+  sendTelegram(
+    REAL_TRADING
+      ? "😈 REAL DEX BOT STARTED"
+      : "📡 PAPER DEX BOT STARTED"
+  );
 
   while (true) {
     try {
